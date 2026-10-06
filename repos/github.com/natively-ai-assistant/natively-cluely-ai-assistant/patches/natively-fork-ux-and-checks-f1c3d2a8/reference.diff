@@ -1,10 +1,10 @@
 diff --git a/electron/main.ts b/electron/main.ts
-index b063486..e57ad0c 100644
+index 5f79dd8..a822d1a 100644
 --- a/electron/main.ts
 +++ b/electron/main.ts
-@@ -1388,6 +1388,14 @@ export class AppState {
-   private updateDownloadState: 'idle' | 'available' | 'downloading' | 'downloaded' = 'idle'
-   private updateDownloadPromise: Promise<unknown> | null = null
+@@ -1451,6 +1451,14 @@ export class AppState {
+   // Last `total` from download-progress; smaller than the file when the download was differential.
+   private lastUpdateProgressTotal: number | null = null
    private downloadedUpdateInfo: any = null
 +  /**
 +   * True while a user-initiated Check is unresolved. electron-updater
@@ -17,7 +17,7 @@ index b063486..e57ad0c 100644
    private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'none'
  
    // View management
-@@ -2806,6 +2814,8 @@ export class AppState {
+@@ -2982,6 +2990,8 @@ export class AppState {
      })
  
      autoUpdater.on("update-available", async (info) => {
@@ -26,7 +26,7 @@ index b063486..e57ad0c 100644
        // PHASE-2A: refuse non-upgrades (downgrade, equal, malformed). electron-updater
        // normally already filters this, but we belt-and-brace it: a stale latest.yml on
        // GitHub (or a republish with the wrong tag) must NEVER cause us to invite the
-@@ -2847,6 +2857,8 @@ export class AppState {
+@@ -3023,6 +3033,8 @@ export class AppState {
      })
  
      autoUpdater.on("update-not-available", (info) => {
@@ -35,7 +35,7 @@ index b063486..e57ad0c 100644
        console.log("[AutoUpdater] Update not available:", info.version)
        this.updateAvailable = false
        this.updateDownloadState = 'idle'
-@@ -2858,6 +2870,19 @@ export class AppState {
+@@ -3034,6 +3046,19 @@ export class AppState {
        console.error("[AutoUpdater] Error:", err)
        this.updateDownloadState = this.updateAvailable ? 'available' : 'idle'
        this.updateDownloadPromise = null
@@ -55,7 +55,7 @@ index b063486..e57ad0c 100644
        // Include more details in the error message for debugging
        const errorMessage = err.message || err.toString() || 'Unknown update error'
        this.broadcast("update-error", errorMessage)
-@@ -2927,6 +2952,7 @@ export class AppState {
+@@ -3113,6 +3138,7 @@ export class AppState {
            };
  
            // Notify renderer
@@ -63,7 +63,7 @@ index b063486..e57ad0c 100644
            this.broadcast("update-available", {
              ...info,
              parsedNotes: notes
-@@ -2936,8 +2962,15 @@ export class AppState {
+@@ -3122,11 +3148,19 @@ export class AppState {
            this.updateAvailable = false;
            this.updateDownloadState = 'idle';
            this.downloadedUpdateInfo = null;
@@ -79,7 +79,11 @@ index b063486..e57ad0c 100644
        }
      } catch (err) {
        console.error('[AutoUpdater] Manual update check failed:', err);
-@@ -3143,6 +3176,10 @@ export class AppState {
++      this.manualCheckFallbackPending = false
+     }
+   }
+ 
+@@ -3329,6 +3363,10 @@ export class AppState {
  
    public async checkForUpdates(): Promise<void> {
      console.log('[AutoUpdater] Manual check for updates requested')
@@ -88,9 +92,9 @@ index b063486..e57ad0c 100644
 +    // of those paths must answer the Check (see manualCheckFallbackPending).
 +    this.manualCheckFallbackPending = true
      try {
-       // In development mode, use manual GitHub API check (electron-updater skips in dev)
-       if (process.env.NODE_ENV === "development") {
-@@ -3151,9 +3188,18 @@ export class AppState {
+       // Use app.isPackaged, not NODE_ENV, matching every other updater gate in
+       // this file (see canAutoInstall()) — a stray NODE_ENV=development in a
+@@ -3340,9 +3378,18 @@ export class AppState {
          await autoUpdater.checkForUpdatesAndNotify()
        }
      } catch (err: any) {
@@ -113,28 +117,22 @@ index b063486..e57ad0c 100644
    }
  
 diff --git a/electron/services/CalendarManager.ts b/electron/services/CalendarManager.ts
-index b280884..12e1832 100644
+index 507f78a..4272275 100644
 --- a/electron/services/CalendarManager.ts
 +++ b/electron/services/CalendarManager.ts
-@@ -6,10 +6,85 @@ import path from 'path';
- import { EventEmitter } from 'events';
+@@ -37,6 +37,81 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
+ const DEFAULT_CALENDAR_CLIENT_ID = '814531619520-80ib40f38i5vdeg0j8kk81r0usojrt9a.apps.googleusercontent.com';
+ const DEFAULT_CALENDAR_CLIENT_SECRET = process.env.NATIVELY_BAKED_CALENDAR_CLIENT_SECRET || '';
  
- // Configuration
--// GOOGLE_CLIENT_SECRET is intentionally NOT referenced here — the desktop app
--// only needs the (non-secret) client ID to construct the auth URL. Token
--// exchange and refresh are proxied through natively-api, which holds the secret.
--const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "YOUR_CLIENT_ID_HERE";
-+// GOOGLE_CLIENT_SECRET is intentionally NOT referenced here — the stock
-+// flow only needs the (non-secret) client ID to construct the auth URL;
-+// token exchange and refresh are proxied through natively-api, which holds
-+// the secret for UPSTREAM's OAuth client.
-+//
-+// Fork builds can use their OWN Google OAuth (Desktop) client instead, via
-+// the direct PKCE flow (no secret needed for public clients — see
-+// electron/services/calendarPkce.ts). The fork client id arrives either
-+// baked into the packaged app (`build.extraMetadata.nativelyGoogleClientId`,
-+// stamped from NATIVELY_GOOGLE_CLIENT_ID at package time) or, for dev,
-+// via GOOGLE_CLIENT_ID together with NATIVELY_CALENDAR_DIRECT=1.
++// ForkHub: a fork build may carry its OWN Google OAuth (Desktop) client id
++// instead of the stock one above — selected here, in one place, so the
++// stock direct flow below behaves exactly as before when no fork client is
++// configured. A fork client id arrives either baked into the packaged app
++// (`build.extraMetadata.nativelyGoogleClientId`, stamped from
++// NATIVELY_GOOGLE_CLIENT_ID at package time) or, for dev, via
++// GOOGLE_CALENDAR_CLIENT_ID together with NATIVELY_CALENDAR_DIRECT=1.
++// Fork-owned clients are public clients: token calls for them carry no
++// secret (see electron/services/calendarPkce.ts).
 +const GOOGLE_CLIENT_ID_PLACEHOLDER = 'YOUR_CLIENT_ID_HERE';
 +
 +/**
@@ -165,24 +163,24 @@ index b280884..12e1832 100644
 +
 +interface CalendarClientConfig {
 +    clientId: string;
-+    /** Direct PKCE with Google (true) vs natively-api proxy (false, stock). */
++    /** Fork-owned public client (true, no secret sent) vs stock client (false). */
 +    direct: boolean;
 +}
 +
 +function resolveCalendarClient(): CalendarClientConfig {
 +    const forkId = readForkGoogleClientId();
 +    if (forkId) return { clientId: forkId, direct: true };
-+    const envId = (process.env.GOOGLE_CLIENT_ID || '').trim();
++    const envId = (process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '').trim();
 +    if (envId && envId !== GOOGLE_CLIENT_ID_PLACEHOLDER) {
 +        return { clientId: envId, direct: process.env.NATIVELY_CALENDAR_DIRECT === '1' };
 +    }
 +    // Fork catalog builds (and only those — gated on the packaged publish
-+    // owner, so upstream checkouts keep the placeholder guard) fall back to
++    // owner, so upstream checkouts keep the stock client) fall back to
 +    // the maintainer's public Desktop client, making Connect calendar work
 +    // out of the box with zero configuration. Explicit configuration above
 +    // always wins.
 +    if (isForkCatalogBuild()) return { clientId: FORK_DEFAULT_CLIENT_ID, direct: true };
-+    return { clientId: GOOGLE_CLIENT_ID_PLACEHOLDER, direct: false };
++    return { clientId: DEFAULT_CALENDAR_CLIENT_ID, direct: false };
 +}
 +
 +/**
@@ -201,132 +199,85 @@ index b280884..12e1832 100644
 +    }
 +}
 +
-+// Legacy export kept for any external readers; prefer resolveCalendarClient().
-+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID_PLACEHOLDER;
- const REDIRECT_URI = "http://localhost:11111/auth/callback";
- const SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"];
- const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
-@@ -17,8 +92,8 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
- // (e.g. http://localhost:3000). Trailing slash is stripped to keep route concat clean.
- const NATIVELY_API_URL = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
+ const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+ const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
+@@ -66,10 +141,15 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
+ /** Token-endpoint errors that mean the stored grant is dead and reconnecting is the only fix. */
+ const DEAD_GRANT_ERRORS = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client', 'deleted_client']);
  
--if (GOOGLE_CLIENT_ID === "YOUR_CLIENT_ID_HERE") {
--    console.warn('[CalendarManager] GOOGLE_CLIENT_ID is using the default placeholder. Calendar features will not work until a valid client ID is provided via env var or build config.');
-+if (resolveCalendarClient().clientId === GOOGLE_CLIENT_ID_PLACEHOLDER) {
-+    console.warn('[CalendarManager] No Google client ID configured. Calendar connect will report it as unavailable; provide one via baked nativelyGoogleClientId (fork builds) or GOOGLE_CLIENT_ID env.');
+-function calendarOAuthClient(): { id: string; secret: string } {
++function calendarOAuthClient(): { id: string; secret: string; direct: boolean } {
++    const { clientId, direct } = resolveCalendarClient();
++    // Fork-owned public clients carry no secret, ever — stock keeps its
++    // baked/env secret exactly as before.
++    if (direct) return { id: clientId, secret: '', direct };
+     return {
+-        id: process.env.GOOGLE_CALENDAR_CLIENT_ID || DEFAULT_CALENDAR_CLIENT_ID,
++        id: process.env.GOOGLE_CALENDAR_CLIENT_ID || clientId,
+         secret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET || DEFAULT_CALENDAR_CLIENT_SECRET,
++        direct,
+     };
  }
  
- export interface CalendarAttendee {
-@@ -45,6 +120,10 @@ export class CalendarManager extends EventEmitter {
-     private expiryDate: number | null = null;
-     private isConnected: boolean = false;
-     private updateInterval: NodeJS.Timeout | null = null;
-+    // PKCE state for the in-flight OAuth flow (direct mode only).
-+    private pendingPkce: { verifier: string; challenge: string } | null = null;
-+    private pendingDirect: boolean = false;
-+    private pendingClientId: string = '';
- 
-     private constructor() {
-         super();
-@@ -67,11 +146,23 @@ export class CalendarManager extends EventEmitter {
-     // =========================================================================
- 
-     public async startAuthFlow(): Promise<void> {
--        // Refuse to start if the client ID isn't configured — otherwise we'd
-+        // Refuse to start if no client ID is configured — otherwise we'd
-         // open a Google page that says "OAuth client not found", the user
-         // never hits the callback, and the loopback server below leaks.
--        if (GOOGLE_CLIENT_ID === "YOUR_CLIENT_ID_HERE") {
--            throw new Error('GOOGLE_CLIENT_ID is not configured. Set it in .env and restart the app.');
-+        // Fork builds: bake nativelyGoogleClientId at package time (from
-+        // NATIVELY_GOOGLE_CLIENT_ID) or, for dev, set GOOGLE_CLIENT_ID plus
-+        // NATIVELY_CALENDAR_DIRECT=1 for the direct PKCE flow.
-+        const { clientId, direct } = resolveCalendarClient();
-+        if (clientId === GOOGLE_CLIENT_ID_PLACEHOLDER) {
-+            throw new Error('Calendar is not configured in this build (missing Google client ID).');
-+        }
-+        this.pendingDirect = direct;
-+        this.pendingClientId = clientId;
-+        this.pendingPkce = null;
-+        if (direct) {
-+            // eslint-disable-next-line @typescript-eslint/no-var-requires
-+            const { createPkcePair } = require('./calendarPkce');
-+            this.pendingPkce = createPkcePair();
+@@ -235,7 +315,7 @@ export class CalendarManager extends EventEmitter {
+         // page that says "OAuth client not found", the user never hits the
+         // callback, and the loopback server below leaks.
+         if (!client.id) {
+-            throw new Error('Calendar sync is not configured in this build (no Google OAuth client ID).');
++            throw new Error('Calendar sync is not configured in this build (missing Google client ID).');
          }
  
-         return new Promise((resolve, reject) => {
-@@ -151,19 +242,44 @@ export class CalendarManager extends EventEmitter {
-         return { connected: this.isConnected };
-     }
- 
--    private getAuthUrl(): string {
-+    private getAuthUrl(challenge?: string): string {
-         const params = new URLSearchParams({
--            client_id: GOOGLE_CLIENT_ID,
-+            client_id: this.pendingClientId || GOOGLE_CLIENT_ID,
-             redirect_uri: REDIRECT_URI,
-             response_type: 'code',
-             scope: SCOPES.join(' '),
-             access_type: 'offline', // For refresh token
-             prompt: 'consent' // Force prompts to ensure we get refresh token
-         });
-+        // PKCE (direct mode): public clients prove possession via challenge.
-+        const effectiveChallenge = challenge ?? this.pendingPkce?.challenge;
-+        if (this.pendingDirect && effectiveChallenge) {
-+            params.set('code_challenge', effectiveChallenge);
-+            params.set('code_challenge_method', 'S256');
-+        }
-         return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-     }
- 
-     private async exchangeCodeForToken(code: string) {
-+        // Direct PKCE mode (fork builds with their own client id): exchange
-+        // straight with Google — the natively-api proxy holds the secret for
-+        // UPSTREAM's OAuth client and cannot serve a foreign client id.
-+        if (this.pendingDirect && this.pendingPkce) {
-+            try {
-+                // eslint-disable-next-line @typescript-eslint/no-var-requires
-+                const { exchangeCodeDirect } = require('./calendarPkce');
-+                const data = await exchangeCodeDirect(
-+                    code,
-+                    this.pendingPkce.verifier,
-+                    this.pendingClientId,
-+                    REDIRECT_URI
-+                );
-+                this.handleTokenResponse(data);
-+            } finally {
-+                this.pendingPkce = null;
-+            }
-+            return;
-+        }
+         // PKCE: only this process knows the verifier, so a code intercepted on
+@@ -361,7 +441,18 @@ export class CalendarManager extends EventEmitter {
+     private async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string) {
+         const client = calendarOAuthClient();
          try {
-             // Proxied through natively-api so GOOGLE_CLIENT_SECRET never ships in the desktop app.
-             // Fetch (vs. axios) so this call shares the global keep-alive pool with every other
-@@ -234,6 +350,24 @@ export class CalendarManager extends EventEmitter {
-             throw new Error('No refresh token available');
+-            const data = await postTokenEndpoint({
++            // Fork-owned public client: exchange straight with Google via the
++            // pure PKCE helpers — no secret exists for a foreign client id.
++            // Stock path below untouched.
++            const data = client.direct
++                // eslint-disable-next-line @typescript-eslint/no-var-requires
++                ? await require('./calendarPkce').exchangeCodeDirect(
++                    code,
++                    codeVerifier,
++                    client.id,
++                    redirectUri
++                )
++                : await postTokenEndpoint({
+                 grant_type: 'authorization_code',
+                 code,
+                 code_verifier: codeVerifier,
+@@ -440,6 +531,28 @@ export class CalendarManager extends EventEmitter {
          }
  
-+        // Direct PKCE mode: refresh straight with Google (public client, no
-+        // secret). Resolved fresh each time so packaged-vs-dev configuration
-+        // cannot go stale across restarts.
-+        const { clientId, direct } = resolveCalendarClient();
-+        if (direct && clientId !== GOOGLE_CLIENT_ID_PLACEHOLDER) {
+         const client = calendarOAuthClient();
++        // Fork-owned public client: refresh straight with Google via the
++        // pure PKCE helpers (no secret). Resolved fresh each time so
++        // packaged-vs-dev configuration cannot go stale across restarts.
++        // Stock path below untouched.
++        if (client.direct && client.id) {
 +            try {
 +                // eslint-disable-next-line @typescript-eslint/no-var-requires
 +                const { refreshTokenDirect } = require('./calendarPkce');
-+                const data = await refreshTokenDirect(this.refreshToken, clientId);
++                const data = await refreshTokenDirect(this.refreshToken, client.id);
 +                this.handleTokenResponse(data);
-+            } catch (error) {
++            } catch (error: any) {
 +                console.error('[CalendarManager] Token refresh failed:', error);
-+                // If refresh fails (e.g. revoked), disconnect
-+                this.disconnect();
++                // Same dead-grant rule as the stock path: only a revoked /
++                // wrong-client grant ends the connection — a network failure
++                // keeps the tokens, or an offline laptop would lose its
++                // calendar on the next refresh.
++                if (error?.code && DEAD_GRANT_ERRORS.has(error.code)) {
++                    this.disconnect();
++                }
 +            }
 +            return;
 +        }
-+
          try {
-             // Proxied through natively-api so GOOGLE_CLIENT_SECRET never ships in the desktop app.
-             const response = await fetch(`${NATIVELY_API_URL}/api/calendar/refresh`, {
+             const data = await postTokenEndpoint({
+                 grant_type: 'refresh_token',
 diff --git a/electron/services/__tests__/CalendarPkce.test.mjs b/electron/services/__tests__/CalendarPkce.test.mjs
 new file mode 100644
 index 0000000..14b4abb
@@ -377,10 +328,10 @@ index 0000000..14b4abb
 +});
 diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
 new file mode 100644
-index 0000000..c2c98a0
+index 0000000..b22080f
 --- /dev/null
 +++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,85 @@
 +// electron/services/__tests__/ForkPatch2Sources.test.mjs
 +//
 +// Source assertions for the second ForkHub patch (calendar direct auth,
@@ -399,7 +350,7 @@ index 0000000..c2c98a0
 +const ROOT = path.resolve(__dirname, '..', '..', '..');
 +const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 +
-+test('calendar: direct PKCE branch coexists with the stock proxy path', () => {
++test('calendar: direct PKCE branch coexists with the stock path', () => {
 +  const src = read('electron/services/CalendarManager.ts');
 +  // Fork channel resolution (baked id or explicit direct env).
 +  assert.match(src, /readForkGoogleClientId/);
@@ -411,13 +362,18 @@ index 0000000..c2c98a0
 +  assert.match(src, /S256/);
 +  assert.match(src, /exchangeCodeDirect/);
 +  assert.match(src, /refreshTokenDirect/);
-+  // Stock proxy path preserved (upstream behavior when not direct).
-+  assert.match(src, /\/api\/calendar\/exchange/);
-+  assert.match(src, /\/api\/calendar\/refresh/);
-+  // No silent misconfiguration: placeholder refuses with a readable error.
++  // Stock direct-with-upstream-client path preserved (upstream behavior
++  // when not direct): the committed client, its resolver, and the
++  // secret-gated token calls are intact. (Upstream v2.9.2 removed the
++  // natively-api proxy the reference patch was written against, so there
++  // are no /api/calendar/* call sites left to preserve — see report.)
++  assert.match(src, /DEFAULT_CALENDAR_CLIENT_ID/);
++  assert.match(src, /calendarOAuthClient/);
++  assert.match(src, /client_secret/);
++  // No silent misconfiguration: missing id refuses with a readable error.
 +  assert.match(src, /missing Google client ID/);
 +  // Catalog builds fall back to the maintainer's public Desktop client
-+  // (gated so stock builds keep the placeholder guard).
++  // (gated so stock builds keep the stock client).
 +  assert.match(src, /FORK_DEFAULT_CLIENT_ID/);
 +  assert.match(src, /apps\.googleusercontent\.com/);
 +  assert.match(src, /isForkCatalogBuild/);
@@ -463,10 +419,10 @@ index 0000000..c2c98a0
 +});
 diff --git a/electron/services/calendarPkce.ts b/electron/services/calendarPkce.ts
 new file mode 100644
-index 0000000..a463d59
+index 0000000..6ac5ccd
 --- /dev/null
 +++ b/electron/services/calendarPkce.ts
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,102 @@
 +/**
 + * electron/services/calendarPkce.ts
 + *
@@ -523,9 +479,13 @@ index 0000000..a463d59
 +    const errBody = await response.json().catch(() => ({} as any));
 +    const detail =
 +      (errBody as any)?.error_description || (errBody as any)?.error || "";
-+    throw new Error(
++    const err = new Error(
 +      `google_token_failed status=${response.status}${detail ? ` ${detail}` : ""}`.trim()
 +    );
++    // Carry Google's machine-readable code so callers can apply the same
++    // dead-grant rule as the stock refresh path (no client_secret involved).
++    (err as any).code = (errBody as any)?.error || "token_request_failed";
++    throw err;
 +  }
 +  return response.json();
 +}
@@ -566,18 +526,38 @@ index 0000000..a463d59
 +  );
 +}
 diff --git a/src/components/AboutSection.tsx b/src/components/AboutSection.tsx
-index 93bced3..92d81eb 100644
+index 5944b31..0c26e15 100644
 --- a/src/components/AboutSection.tsx
 +++ b/src/components/AboutSection.tsx
-@@ -40,20 +40,30 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
+@@ -104,6 +104,10 @@ const PRIVACY: AboutItem[] = [
+ 
+ const REPO_URL = 'https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant';
+ const DONATE_URL = 'https://buymeacoffee.com/evinjohnn';
++// ForkHub: the Support button opens the original creator link AND the fork
++// maintainer's sponsors page, so both get funded.
++const FORK_SPONSORS_URL = 'https://github.com/sponsors/ImBIOS/';
++const MAINTAINER_GITHUB_URL = 'https://github.com/ImBIOS';
+ 
+ const CREATOR_LINKS = [
+     { label: 'GitHub', url: REPO_URL, Icon: Github },
+@@ -112,6 +116,12 @@ const CREATOR_LINKS = [
+     { label: 'Instagram', url: 'https://www.instagram.com/evinjohnn/', Icon: Instagram },
+ ];
+ 
++// ForkHub: the maintainer's links — profile and sponsors page.
++const MAINTAINER_LINKS = [
++    { label: 'GitHub', url: MAINTAINER_GITHUB_URL, Icon: Github },
++    { label: 'Sponsor', url: FORK_SPONSORS_URL, Icon: Heart },
++];
++
+ // About is built from `./settings/SettingsRow` — the module General, Audio,
+ // Sync, Intelligence and Provider Performance are built from, whose own header
+ // says it exists "so a pane that adopts the Settings look takes the same
+@@ -211,17 +221,23 @@ export const AboutSection: React.FC<AboutSectionProps> = ({ onNavigate, onOpenMo
          return () => window.removeEventListener('focus', handleFocus);
      }, []);
  
-+    // ForkHub: the Support button opens the original creator link AND the
-+    // fork maintainer's sponsors page, so both get funded.
-+    const FORK_SPONSORS_URL = "https://github.com/sponsors/ImBIOS/";
-+
-+    const openExternalBoth = (url: string) => {
++    const openExternal = (url: string) => {
 +        if (window.electronAPI?.openExternal) {
 +            window.electronAPI.openExternal(url);
 +        } else {
@@ -585,126 +565,51 @@ index 93bced3..92d81eb 100644
 +        }
 +    };
 +
-     const handleOpenLink = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
-         e.preventDefault();
- 
-         // Special handling for donation link
-         if (url.includes('buymeacoffee.com')) {
+     const openLink = (url: string) => {
+         // Returning >20s after opening the donation page marks it complete (above).
+         if (url === DONATE_URL) {
              donationClickTimeRef.current = Date.now();
 +            // ForkHub: also open the fork maintainer's sponsors page.
-+            openExternalBoth(FORK_SPONSORS_URL);
++            openExternal(FORK_SPONSORS_URL);
          }
  
-         // Use backend shell.openExternal
 -        if (window.electronAPI?.openExternal) {
 -            window.electronAPI.openExternal(url);
 -        } else {
 -            window.open(url, '_blank');
 -        }
-+        openExternalBoth(url);
++        openExternal(url);
      };
  
-     return (
-@@ -324,6 +334,44 @@ export const AboutSection: React.FC<AboutSectionProps> = () => {
-                         </div>
-                     </div>
- 
-+                    {/* 1b. Fork Maintainer Profile (ForkHub) */}
-+                    <div className="bg-bg-item-surface rounded-xl p-5">
-+                        <div className="flex flex-col gap-4">
-+                            <div className="flex items-start gap-4">
-+                                <div className="w-12 h-12 rounded-full bg-violet-500/15 border border-violet-400/20 flex items-center justify-center shrink-0">
-+                                    <span className="text-sm font-bold text-violet-300">IA</span>
-+                                </div>
-+                                <div className="pt-0.5">
-+                                    <div className="flex items-center gap-2 mb-1">
-+                                        <h5 className="text-sm font-bold text-text-primary">Imamuzzaki Abu Salam</h5>
-+                                        <span className={`text-[10px] font-medium px-1.5 py-[1px] rounded-full ${isLight ? 'bg-violet-100 text-violet-700 border border-violet-300' : 'bg-violet-400/10 text-violet-200 border border-violet-400/20'}`}>{t('Fork Maintainer')}</span>
-+                                    </div>
-+                                    <p className="text-xs text-text-secondary leading-relaxed max-w-lg">
-+                                        {t('Maintains the ForkHub build: independent releases, Linux installers, and auto-updates from the fork catalog.')}
-+                                    </p>
-+                                </div>
-+                            </div>
-+                            <div className="flex items-center gap-4 pl-[60px]">
-+                                <a
-+                                    href="https://github.com/ImBIOS"
-+                                    onClick={(e) => handleOpenLink(e, "https://github.com/ImBIOS")}
-+                                    className="text-text-tertiary hover:text-text-primary transition-colors"
-+                                    title="GitHub"
-+                                >
-+                                    <Github size={18} />
-+                                </a>
-+                                <a
-+                                    href="https://github.com/sponsors/ImBIOS/"
-+                                    onClick={(e) => handleOpenLink(e, "https://github.com/sponsors/ImBIOS/")}
-+                                    className="text-text-tertiary hover:text-text-primary transition-colors"
-+                                    title={t('Sponsor')}
-+                                >
-+                                    <Heart size={18} />
-+                                </a>
-+                            </div>
-+                        </div>
-+                    </div>
-+
-                     {/* 2. Star & Report */}
-                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                         <a
+     const iconLinks = (links: typeof CREATOR_LINKS) => (
+@@ -406,6 +422,15 @@ export const AboutSection: React.FC<AboutSectionProps> = ({ onNavigate, onOpenMo
+                         description="I build software that stays out of the way."
+                         control={iconLinks(CREATOR_LINKS)}
+                     />
++                    {/* Fork Maintainer (ForkHub): who ships this build — the
++                        initials tile keeps binary assets out of the patch. */}
++                    <SettingsRow
++                        icon={<span className="flex h-full w-full items-center justify-center text-sm font-bold text-violet-300">IA</span>}
++                        title="Imamuzzaki Abu Salam"
++                        badge={<LiquidGlassBadge variant="neutral">{t('Fork Maintainer')}</LiquidGlassBadge>}
++                        description={t('Maintains the ForkHub build: independent releases, Linux installers, and auto-updates from the fork catalog.')}
++                        control={iconLinks(MAINTAINER_LINKS)}
++                    />
+                     {actions.map(({ title, body, action }) => (
+                         <CommunityActionRow key={title} title={title} body={body} control={action} />
+                     ))}
 diff --git a/src/components/ui/ConnectCalendarButton.tsx b/src/components/ui/ConnectCalendarButton.tsx
-index d5879d6..9d2158f 100644
+index b8e9669..b16dbd2 100644
 --- a/src/components/ui/ConnectCalendarButton.tsx
 +++ b/src/components/ui/ConnectCalendarButton.tsx
-@@ -19,6 +19,10 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
-     const t = useT();
-     const [loading, setLoading] = useState(false);
-     const [connected, setConnected] = useState(false);
-+    // Last connect failure, shown under the button (cleared on retry).
-+    // Previously failures were only console.error'd — the spinner just
-+    // stopped and users had no idea the feature needs configuration.
-+    const [error, setError] = useState<string | null>(null);
- 
-     useEffect(() => {
-         if (window.electronAPI) {
-@@ -38,6 +42,7 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
-         if (connected) return; // For now no disconnect here
- 
-         setLoading(true);
-+        setError(null);
-         try {
-             const res = await window.electronAPI.calendarConnect();
-             if (res.success) {
-@@ -45,9 +50,12 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
-                 onConnect?.();
-                 // Track calendar connection (analytics imported statically above)
-                 analytics.trackCalendarConnected();
+@@ -100,6 +100,10 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
+             } else if (res.error) {
+                 console.error('[ConnectCalendarButton] Connection error:', res.error);
+                 setError(res.error);
 +            } else {
-+                setError(res.error || t('Could not connect calendar'));
++                // No success and no message (e.g. a misconfigured build that
++                // refuses without detail) — say so instead of dying silently.
++                setError(t('Could not connect calendar'));
              }
--        } catch (err) {
-+        } catch (err: any) {
-             console.error(err);
-+            setError(err?.message || t('Could not connect calendar'));
-         } finally {
-             setLoading(false);
-         }
-@@ -143,6 +151,7 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
-     }
- 
-     return (
-+        <>
-         <button
-             onClick={handleClick}
-             disabled={loading}
-@@ -215,6 +224,12 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
-                 )}
-             </span>
-         </button>
-+        {error && !loading && (
-+            <div className="text-[11px] leading-snug text-red-400/90 max-w-[260px] mt-1.5 px-1">
-+                {error}
-+            </div>
-+        )}
-+        </>
-     );
- };
- 
+         } catch (err: any) {
+             console.error('[ConnectCalendarButton] Connection exception:', err);

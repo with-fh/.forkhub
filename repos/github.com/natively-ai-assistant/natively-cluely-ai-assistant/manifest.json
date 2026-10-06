@@ -10,19 +10,19 @@
   "patches": {
     "natively-forkhub-update-track-53ac9810": {
       "status": "draft",
-      "version": 5,
+      "version": 6,
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "natively/forkhub-update-track-natively",
-      "last_realized_against_commit": "a2485e4"
+      "last_realized_against_commit": "b439c1f0"
     },
     "natively-fork-ux-and-checks-f1c3d2a8": {
       "status": "draft",
-      "version": 2,
+      "version": 3,
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "natively/fork-ux-and-checks",
-      "last_realized_against_commit": "a2485e4"
+      "last_realized_against_commit": "b439c1f0"
     },
     "natively-linux-dock-icon-a7e2c41b": {
       "status": "draft",
@@ -33,7 +33,11 @@
       "last_realized_against_commit": "a2485e4"
     }
   },
-  "apply_order": ["natively-forkhub-update-track-53ac9810", "natively-fork-ux-and-checks-f1c3d2a8", "natively-linux-dock-icon-a7e2c41b"],
+  "apply_order": [
+    "natively-forkhub-update-track-53ac9810",
+    "natively-fork-ux-and-checks-f1c3d2a8",
+    "natively-linux-dock-icon-a7e2c41b"
+  ],
   "slug_aliases": {
     "natively-forkhub-update-track": "natively-forkhub-update-track-53ac9810",
     "natively-fork-ux-and-checks": "natively-fork-ux-and-checks-f1c3d2a8",
