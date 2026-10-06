@@ -5,7 +5,7 @@ target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
 target_area: [electron/update/updateFeed.ts, electron/update/ReleaseNotesManager.ts, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, src/components/UpdateBanner.tsx, src/components/onboarding/OrchestratedToasterHost.tsx, src/types/electron.d.ts, package.json]
 status: draft
 applied_upstream_pr: none
-version: 5
+version: 6
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -13,7 +13,7 @@ owners: [Imamuzzaki Abu Salam]
 source_url: null
 imported_at: null
 created: 2026-09-27
-last_realized_against_commit: a2485e4
+last_realized_against_commit: b439c1f0
 verifies_with: node --test (focused suites, see verify.sh)
 ---
 

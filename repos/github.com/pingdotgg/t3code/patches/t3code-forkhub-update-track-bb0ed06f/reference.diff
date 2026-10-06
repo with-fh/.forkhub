@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/app/DesktopApp.ts b/apps/desktop/src/app/DesktopApp.ts
-index 36536388..ddeaa3df 100644
+index 08318bcd8..0030dfbf8 100644
 --- a/apps/desktop/src/app/DesktopApp.ts
 +++ b/apps/desktop/src/app/DesktopApp.ts
 @@ -19,6 +19,7 @@ import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
@@ -7,10 +7,10 @@ index 36536388..ddeaa3df 100644
  import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
  import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 +import { importStockStateOnFirstForkHubBoot } from "./DesktopForkHubStockImport.ts";
+ import * as DesktopLegacyLocalStorage from "./DesktopLegacyLocalStorage.ts";
  import * as DesktopLifecycle from "./DesktopLifecycle.ts";
  import * as DesktopLinuxUrlHandler from "./DesktopLinuxUrlHandler.ts";
- import * as DesktopObservability from "./DesktopObservability.ts";
-@@ -295,6 +296,10 @@ const startup = Effect.gen(function* () {
+@@ -301,6 +302,10 @@ const startup = Effect.gen(function* () {
    const userDataPath = yield* appIdentity.resolveUserDataPath;
    yield* electronApp.setPath("userData", userDataPath);
    yield* logStartupInfo("runtime logging configured", { logDir: environment.logDir });
@@ -22,7 +22,7 @@ index 36536388..ddeaa3df 100644
  
    if (linuxElectronOptions !== null) {
 diff --git a/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts b/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts
-index 70441702..9d039be4 100644
+index 70441702e..9d039be48 100644
 --- a/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts
 +++ b/apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts
 @@ -15,6 +15,7 @@ describe("DesktopEarlyElectronStartup", () => {
@@ -124,7 +124,7 @@ index 70441702..9d039be4 100644
          assert.equal(path, "/home/user/.t3/dev/desktop-settings.json");
          return JSON.stringify({ linuxPasswordStore: "gnome-libsecret" });
 diff --git a/apps/desktop/src/app/DesktopEarlyElectronStartup.ts b/apps/desktop/src/app/DesktopEarlyElectronStartup.ts
-index 95922bdf..595ad35a 100644
+index 95922bdfd..595ad35af 100644
 --- a/apps/desktop/src/app/DesktopEarlyElectronStartup.ts
 +++ b/apps/desktop/src/app/DesktopEarlyElectronStartup.ts
 @@ -9,6 +9,7 @@ import {
@@ -195,7 +195,7 @@ index 95922bdf..595ad35a 100644
        preference,
        env: input.env,
 diff --git a/apps/desktop/src/app/DesktopEnvironment.test.ts b/apps/desktop/src/app/DesktopEnvironment.test.ts
-index b5aabf25..5f5de25e 100644
+index b5aabf253..5f5de25e7 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.test.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.test.ts
 @@ -155,6 +155,36 @@ describe("DesktopEnvironment", () => {
@@ -271,28 +271,45 @@ index b5aabf25..5f5de25e 100644
      Effect.gen(function* () {
        const environment = yield* makeEnvironment();
 diff --git a/apps/desktop/src/app/DesktopEnvironment.ts b/apps/desktop/src/app/DesktopEnvironment.ts
-index beb09bd5..0e1aa47c 100644
+index 6a8bc8e0e..325841e1a 100644
 --- a/apps/desktop/src/app/DesktopEnvironment.ts
 +++ b/apps/desktop/src/app/DesktopEnvironment.ts
-@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
- import * as Path from "effect/Path";
- 
- import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
-+import { isForkHubDerivedVersion, resolveForkHubVersionOwner } from "../updates/updateChannels.ts";
+@@ -15,7 +15,11 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
  import * as DesktopConfig from "./DesktopConfig.ts";
  import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
  import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
-@@ -45,6 +46,9 @@ export class DesktopEnvironment extends Context.Service<
+-import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
++import {
++  isForkHubDerivedVersion,
++  isNightlyDesktopVersion,
++  resolveForkHubVersionOwner,
++} from "../updates/updateChannels.ts";
+ import type { OtlpProtocol } from "@t3tools/shared/observability";
+ 
+ export interface MakeDesktopEnvironmentInput {
+@@ -45,6 +49,12 @@ export class DesktopEnvironment extends Context.Service<
      readonly homeDirectory: string;
      readonly appDataDirectory: string;
      readonly baseDir: string;
 +    // False when T3CODE_HOME pins the backend home: an explicit home is
 +    // always honored as-is, never migrated or imported into.
 +    readonly isImplicitHome: boolean;
++    // True for builds carrying ForkHub version provenance (`.fh.<owner>.<n>`).
++    // Threaded into DesktopUserData so the Electron profile stays isolated.
++    readonly isForkHubBuild: boolean;
      readonly stateDir: string;
      readonly desktopSettingsPath: string;
      readonly clientSettingsPath: string;
-@@ -108,11 +112,25 @@ function resolveDesktopAppStageLabel(input: {
+@@ -86,6 +96,8 @@ export class DesktopEnvironment extends Context.Service<
+     readonly linuxWmClass: string;
+     readonly linuxApplicationsDir: string;
+     readonly appImagePath: Option.Option<string>;
++    readonly userDataDirName: string;
++    readonly legacyUserDataDirName: string;
+     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
+     readonly runtimeInfo: DesktopRuntimeInfo;
+     readonly resolvePickFolderDefaultPath: (rawOptions: unknown) => Option.Option<string>;
+@@ -106,11 +118,25 @@ function resolveDesktopAppStageLabel(input: {
    return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Alpha";
  }
  
@@ -318,7 +335,7 @@ index beb09bd5..0e1aa47c 100644
    return {
      baseName: APP_BASE_NAME,
      stageLabel,
-@@ -166,10 +184,14 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -164,10 +190,14 @@ const make = Effect.fn("desktop.environment.make")(function* (
        : input.platform === "darwin"
          ? path.join(homeDirectory, "Library", "Application Support")
          : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
@@ -333,17 +350,18 @@ index beb09bd5..0e1aa47c 100644
    });
    const rootDir = path.resolve(input.dirname, "../../..");
    const appRoot = input.isPackaged ? input.appPath : rootDir;
-@@ -188,8 +210,21 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -186,6 +216,24 @@ const make = Effect.fn("desktop.environment.make")(function* (
      joinPath: path.join,
      t3Home: config.t3Home,
    });
--  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
--  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
 +  // A ForkHub install gets its own Electron profile, window class, and OS app
 +  // identity so it can run at the same time as a stock install: Chromium's
 +  // single-instance lock is per user-data dir, and the taskbar/dock groups by
 +  // app id / window class. The legacy dir is intentionally a name no previous
 +  // build ever used, so ForkHub never adopts the shared stock profile.
++  // (Upstream moved live profile resolution to DesktopUserData, which reads
++  // isForkHubBuild from this service; these names are kept for identity and
++  // tests.)
 +  const userDataDirName = isDevelopment
 +    ? "t3code-dev"
 +    : isForkHubBuild
@@ -357,15 +375,16 @@ index beb09bd5..0e1aa47c 100644
    const linuxApplicationsDir = path.join(
      Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
      "applications",
-@@ -209,6 +244,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -205,6 +253,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
      homeDirectory,
      appDataDirectory,
      baseDir,
 +    isImplicitHome,
++    isForkHubBuild,
      stateDir,
      desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),
      clientSettingsPath: path.join(stateDir, "client-settings.json"),
-@@ -240,10 +276,14 @@ const make = Effect.fn("desktop.environment.make")(function* (
+@@ -236,12 +286,18 @@ const make = Effect.fn("desktop.environment.make")(function* (
      branding,
      displayName,
      appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
@@ -382,10 +401,14 @@ index beb09bd5..0e1aa47c 100644
 +    linuxWmClass: isDevelopment ? "t3code-dev" : isForkHubBuild ? "t3code-forkhub" : "t3code",
      linuxApplicationsDir,
      appImagePath: config.appImagePath,
-     userDataDirName,
++    userDataDirName,
++    legacyUserDataDirName,
+     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
+     runtimeInfo: resolveDesktopRuntimeInfo({
+       platform: input.platform,
 diff --git a/apps/desktop/src/app/DesktopForkHubStateTransfer.test.ts b/apps/desktop/src/app/DesktopForkHubStateTransfer.test.ts
 new file mode 100644
-index 00000000..ddb9f484
+index 000000000..ddb9f4840
 --- /dev/null
 +++ b/apps/desktop/src/app/DesktopForkHubStateTransfer.test.ts
 @@ -0,0 +1,483 @@
@@ -874,7 +897,7 @@ index 00000000..ddb9f484
 +});
 diff --git a/apps/desktop/src/app/DesktopForkHubStateTransfer.ts b/apps/desktop/src/app/DesktopForkHubStateTransfer.ts
 new file mode 100644
-index 00000000..f436e1da
+index 000000000..f436e1da1
 --- /dev/null
 +++ b/apps/desktop/src/app/DesktopForkHubStateTransfer.ts
 @@ -0,0 +1,1062 @@
@@ -1942,7 +1965,7 @@ index 00000000..f436e1da
 +}
 diff --git a/apps/desktop/src/app/DesktopForkHubStockImport.test.ts b/apps/desktop/src/app/DesktopForkHubStockImport.test.ts
 new file mode 100644
-index 00000000..cf6d18eb
+index 000000000..cf6d18eb7
 --- /dev/null
 +++ b/apps/desktop/src/app/DesktopForkHubStockImport.test.ts
 @@ -0,0 +1,220 @@
@@ -2168,7 +2191,7 @@ index 00000000..cf6d18eb
 +});
 diff --git a/apps/desktop/src/app/DesktopForkHubStockImport.ts b/apps/desktop/src/app/DesktopForkHubStockImport.ts
 new file mode 100644
-index 00000000..084a1d5d
+index 000000000..084a1d5d3
 --- /dev/null
 +++ b/apps/desktop/src/app/DesktopForkHubStockImport.ts
 @@ -0,0 +1,83 @@
@@ -2255,8 +2278,20 @@ index 00000000..084a1d5d
 +  ),
 +  Effect.withSpan("desktop.forkhub.stockImport"),
 +);
+diff --git a/apps/desktop/src/app/DesktopPreReadyFileSystem.test.ts b/apps/desktop/src/app/DesktopPreReadyFileSystem.test.ts
+index ab4c4f86c..08acb36d5 100644
+--- a/apps/desktop/src/app/DesktopPreReadyFileSystem.test.ts
++++ b/apps/desktop/src/app/DesktopPreReadyFileSystem.test.ts
+@@ -13,6 +13,7 @@ const resolveWindowsUserData = (appDataDirectory: string) =>
+   DesktopUserData.resolveUserDataPath({
+     appDataDirectory,
+     isDevelopment: false,
++    isForkHubBuild: false,
+     platform: "win32",
+   }).pipe(Effect.provide(DesktopPreReadyFileSystem.layer));
+ 
 diff --git a/apps/desktop/src/app/DesktopPreReadyPlatform.ts b/apps/desktop/src/app/DesktopPreReadyPlatform.ts
-index 9b73a5d8..384e1d93 100644
+index 9b73a5d82..384e1d93d 100644
 --- a/apps/desktop/src/app/DesktopPreReadyPlatform.ts
 +++ b/apps/desktop/src/app/DesktopPreReadyPlatform.ts
 @@ -38,6 +38,7 @@ export const resolveEarlyLinuxElectronOptionsFromProcess =
@@ -2268,7 +2303,7 @@ index 9b73a5d8..384e1d93 100644
  
  export class DesktopPreReadyElectronOptions extends Context.Service<
 diff --git a/apps/desktop/src/app/DesktopStatePaths.ts b/apps/desktop/src/app/DesktopStatePaths.ts
-index 006dd970..b24fbab6 100644
+index 006dd9709..b24fbab6e 100644
 --- a/apps/desktop/src/app/DesktopStatePaths.ts
 +++ b/apps/desktop/src/app/DesktopStatePaths.ts
 @@ -14,9 +14,13 @@ export function resolveDesktopBaseDir(input: {
@@ -2286,8 +2321,77 @@ index 006dd970..b24fbab6 100644
    );
  }
  
+diff --git a/apps/desktop/src/app/DesktopUserData.test.ts b/apps/desktop/src/app/DesktopUserData.test.ts
+index 41e497463..d6e91b519 100644
+--- a/apps/desktop/src/app/DesktopUserData.test.ts
++++ b/apps/desktop/src/app/DesktopUserData.test.ts
+@@ -19,6 +19,7 @@ it.effect("identifies a failed source read and preserves its cause", () => {
+     const error = yield* resolveUserDataPath({
+       appDataDirectory: "/profiles",
+       isDevelopment: false,
++      isForkHubBuild: false,
+       platform: "win32",
+     }).pipe(Effect.flip);
+     assert.equal(error.operation, "read");
+@@ -54,6 +55,7 @@ it.effect.each(["t3code", "T3 Code (Alpha)"])(
+       yield* resolveUserDataPath({
+         appDataDirectory: directory,
+         isDevelopment: false,
++        isForkHubBuild: false,
+         platform: "win32",
+       });
+       assert.equal(yield* fs.readFileString(path.join(destination, "Local State")), state);
+@@ -63,6 +65,7 @@ it.effect.each(["t3code", "T3 Code (Alpha)"])(
+       yield* resolveUserDataPath({
+         appDataDirectory: directory,
+         isDevelopment: false,
++        isForkHubBuild: false,
+         platform: "win32",
+       });
+       assert.equal(
+diff --git a/apps/desktop/src/app/DesktopUserData.ts b/apps/desktop/src/app/DesktopUserData.ts
+index 3306b244d..a3e8c7683 100644
+--- a/apps/desktop/src/app/DesktopUserData.ts
++++ b/apps/desktop/src/app/DesktopUserData.ts
+@@ -37,12 +37,17 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
+     readonly appDataDirectory: string;
+     readonly isDevelopment: boolean;
+     readonly platform: NodeJS.Platform;
++    // ForkHub installs resolve their own Chromium profile so stock and
++    // ForkHub can run side by side (per-dir single-instance lock).
++    readonly isForkHubBuild: boolean;
+   }) {
+     const fs = yield* FileSystem.FileSystem;
+     const path = yield* Path.Path;
+     const names = input.isDevelopment
+       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
+-      : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
++      : input.isForkHubBuild
++        ? { current: "t3code-forkhub", legacy: "T3 Code x ForkHub" }
++        : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
+     const destinationPath = path.join(input.appDataDirectory, names.current);
+     const legacyPath = path.join(input.appDataDirectory, names.legacy);
+     const inspect = (resourcePath: string) =>
+@@ -61,10 +66,15 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
+     const destinationState = path.join(destinationPath, "Local State");
+     if (yield* inspect(destinationState)) return destinationPath;
+     const legacyState = path.join(legacyPath, "Local State");
++    // A ForkHub install never adopts stock profile state: its legacy name is
++    // one no previous build ever used, and the stock fallback below is
++    // skipped, so ForkHub always starts its own Chromium profile.
+     const sourceState = (yield* inspect(legacyState))
+       ? legacyState
+-      : path.join(input.appDataDirectory, "t3code", "Local State");
+-    if (!(yield* inspect(sourceState))) return destinationPath;
++      : input.isForkHubBuild
++        ? null
++        : path.join(input.appDataDirectory, "t3code", "Local State");
++    if (sourceState === null || !(yield* inspect(sourceState))) return destinationPath;
+     // Windows safeStorage keys live here. Copy only these preferences, never locked databases.
+     const state = yield* fs
+       .readFileString(sourceState)
 diff --git a/apps/desktop/src/backend/DesktopServerExposure.test.ts b/apps/desktop/src/backend/DesktopServerExposure.test.ts
-index 0914167c..4efc8f9d 100644
+index b9c460825..aed732794 100644
 --- a/apps/desktop/src/backend/DesktopServerExposure.test.ts
 +++ b/apps/desktop/src/backend/DesktopServerExposure.test.ts
 @@ -254,6 +254,7 @@ describe("DesktopServerExposure", () => {
@@ -2299,7 +2403,7 @@ index 0914167c..4efc8f9d 100644
        setWslDistro: () => Effect.die("unexpected WSL distro change"),
        setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
 diff --git a/apps/desktop/src/ipc/DesktopIpcHandlers.ts b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
-index 4b43cd0e..3fc9f798 100644
+index a16535c4a..dddb30ec2 100644
 --- a/apps/desktop/src/ipc/DesktopIpcHandlers.ts
 +++ b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
 @@ -35,8 +35,13 @@ import {
@@ -2316,7 +2420,7 @@ index 4b43cd0e..3fc9f798 100644
  import {
    getAppBranding,
    getLocalEnvironmentBootstraps,
-@@ -140,6 +145,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
+@@ -146,6 +151,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
    yield* ipc.handle(probeRemoteEditors);
    yield* ipc.handle(getUpdateState);
    yield* ipc.handle(setUpdateChannel);
@@ -2327,7 +2431,7 @@ index 4b43cd0e..3fc9f798 100644
    yield* ipc.handle(installUpdate);
    yield* ipc.handle(checkForUpdate);
 diff --git a/apps/desktop/src/ipc/channels.ts b/apps/desktop/src/ipc/channels.ts
-index 151cd633..541dacf5 100644
+index 098748dff..78f3bbc0b 100644
 --- a/apps/desktop/src/ipc/channels.ts
 +++ b/apps/desktop/src/ipc/channels.ts
 @@ -20,6 +20,9 @@ export const DESKTOP_APP_ACTIVATION_REQUEST_CHANNEL = "desktop:app-activation-re
@@ -2342,7 +2446,7 @@ index 151cd633..541dacf5 100644
  export const UPDATE_CHECK_CHANNEL = "desktop:update-check";
 diff --git a/apps/desktop/src/ipc/methods/forkHubStateTransfer.ts b/apps/desktop/src/ipc/methods/forkHubStateTransfer.ts
 new file mode 100644
-index 00000000..28d495a0
+index 000000000..28d495a05
 --- /dev/null
 +++ b/apps/desktop/src/ipc/methods/forkHubStateTransfer.ts
 @@ -0,0 +1,40 @@
@@ -2387,7 +2491,7 @@ index 00000000..28d495a0
 +  }),
 +});
 diff --git a/apps/desktop/src/ipc/methods/updates.ts b/apps/desktop/src/ipc/methods/updates.ts
-index b2212609..2fb4905b 100644
+index b22126090..2fb4905b4 100644
 --- a/apps/desktop/src/ipc/methods/updates.ts
 +++ b/apps/desktop/src/ipc/methods/updates.ts
 @@ -1,4 +1,5 @@
@@ -2419,10 +2523,10 @@ index b2212609..2fb4905b 100644
    channel: IpcChannels.UPDATE_DOWNLOAD_CHANNEL,
    payload: Schema.Void,
 diff --git a/apps/desktop/src/preload.ts b/apps/desktop/src/preload.ts
-index e84a5821..706f5276 100644
+index 7d7269974..715653126 100644
 --- a/apps/desktop/src/preload.ts
 +++ b/apps/desktop/src/preload.ts
-@@ -252,6 +252,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
+@@ -265,6 +265,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
    getUpdateState: () => ipcRenderer.invoke(IpcChannels.UPDATE_GET_STATE_CHANNEL),
    setUpdateChannel: (channel) =>
      ipcRenderer.invoke(IpcChannels.UPDATE_SET_CHANNEL_CHANNEL, channel),
@@ -2436,7 +2540,7 @@ index e84a5821..706f5276 100644
    downloadUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_DOWNLOAD_CHANNEL),
    installUpdate: () => ipcRenderer.invoke(IpcChannels.UPDATE_INSTALL_CHANNEL),
 diff --git a/apps/desktop/src/settings/DesktopAppSettings.test.ts b/apps/desktop/src/settings/DesktopAppSettings.test.ts
-index f7db3c27..a0a18654 100644
+index 18813eb90..1e72cd336 100644
 --- a/apps/desktop/src/settings/DesktopAppSettings.test.ts
 +++ b/apps/desktop/src/settings/DesktopAppSettings.test.ts
 @@ -132,6 +132,11 @@ describe("DesktopSettings", () => {
@@ -2606,7 +2710,7 @@ index f7db3c27..a0a18654 100644
              wslBackendEnabled: false,
              wslOnly: false,
              wslDistro: null,
-@@ -376,6 +508,11 @@ describe("DesktopSettings", () => {
+@@ -404,6 +536,11 @@ describe("DesktopSettings", () => {
            tailscaleServePort: 443,
            updateChannel: "nightly",
            updateChannelConfiguredByUser: false,
@@ -2618,7 +2722,7 @@ index f7db3c27..a0a18654 100644
            wslBackendEnabled: false,
            wslOnly: false,
            wslDistro: null,
-@@ -405,6 +542,11 @@ describe("DesktopSettings", () => {
+@@ -433,6 +570,11 @@ describe("DesktopSettings", () => {
            tailscaleServePort: 443,
            updateChannel: "latest",
            updateChannelConfiguredByUser: true,
@@ -2630,7 +2734,7 @@ index f7db3c27..a0a18654 100644
            wslBackendEnabled: false,
            wslOnly: false,
            wslDistro: null,
-@@ -433,6 +575,11 @@ describe("DesktopSettings", () => {
+@@ -461,6 +603,11 @@ describe("DesktopSettings", () => {
            tailscaleServePort: 443,
            updateChannel: "latest",
            updateChannelConfiguredByUser: false,
@@ -2643,7 +2747,7 @@ index f7db3c27..a0a18654 100644
            wslOnly: false,
            wslDistro: null,
 diff --git a/apps/desktop/src/settings/DesktopAppSettings.ts b/apps/desktop/src/settings/DesktopAppSettings.ts
-index 19fcf0e7..cea911e5 100644
+index efd9fbfbf..778560912 100644
 --- a/apps/desktop/src/settings/DesktopAppSettings.ts
 +++ b/apps/desktop/src/settings/DesktopAppSettings.ts
 @@ -1,6 +1,9 @@
@@ -2656,7 +2760,7 @@ index 19fcf0e7..cea911e5 100644
    type DesktopServerExposureMode,
    type DesktopUpdateChannel,
  } from "@t3tools/contracts";
-@@ -21,7 +24,11 @@ import {
+@@ -22,7 +25,11 @@ import {
    normalizeLinuxPasswordStorePreference,
    type LinuxPasswordStorePreference,
  } from "../linuxSecretStorage.ts";
@@ -2669,7 +2773,7 @@ index 19fcf0e7..cea911e5 100644
  import { isValidDistroName } from "../wsl/wslPathParsing.ts";
  
  export interface DesktopSettings {
-@@ -34,6 +41,16 @@ export interface DesktopSettings {
+@@ -35,6 +42,16 @@ export interface DesktopSettings {
    readonly tailscaleServePort: number;
    readonly updateChannel: DesktopUpdateChannel;
    readonly updateChannelConfiguredByUser: boolean;
@@ -2686,7 +2790,7 @@ index 19fcf0e7..cea911e5 100644
    // Was a "local" | "wsl" swap mode in an earlier iteration of the WSL
    // integration. We now run Windows and WSL backends side by side, so the
    // setting is just whether the WSL backend should be running alongside the
-@@ -83,6 +100,10 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
+@@ -84,6 +101,10 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
    tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
    updateChannel: "latest",
    updateChannelConfiguredByUser: false,
@@ -2697,7 +2801,7 @@ index 19fcf0e7..cea911e5 100644
    wslBackendEnabled: false,
    wslDistro: null,
    wslOnly: false,
-@@ -103,8 +124,17 @@ const DesktopSettingsDocument = Schema.Struct({
+@@ -104,8 +125,17 @@ const DesktopSettingsDocument = Schema.Struct({
    serverExposureMode: Schema.optionalKey(DesktopServerExposureModeSchema),
    tailscaleServeEnabled: Schema.optionalKey(Schema.Boolean),
    tailscaleServePort: Schema.optionalKey(Schema.Number),
@@ -2716,7 +2820,7 @@ index 19fcf0e7..cea911e5 100644
    // Newer form of the WSL toggle. `wslMode` is still accepted on load so
    // existing on-disk settings keep working; on the next persist we write the
    // new boolean and the legacy key drops out.
-@@ -172,6 +202,12 @@ export class DesktopAppSettings extends Context.Service<
+@@ -174,6 +204,12 @@ export class DesktopAppSettings extends Context.Service<
      readonly setUpdateChannel: (
        channel: DesktopUpdateChannel,
      ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
@@ -2729,7 +2833,7 @@ index 19fcf0e7..cea911e5 100644
      readonly setWslBackendEnabled: (
        enabled: boolean,
      ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
-@@ -193,6 +229,9 @@ export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettin
+@@ -195,6 +231,9 @@ export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettin
    return {
      ...DEFAULT_DESKTOP_SETTINGS,
      updateChannel: resolveDefaultDesktopUpdateChannel(appVersion),
@@ -2739,7 +2843,7 @@ index 19fcf0e7..cea911e5 100644
    };
  }
  
-@@ -229,6 +268,12 @@ function normalizeDesktopSettingsDocument(
+@@ -231,6 +270,12 @@ function normalizeDesktopSettingsDocument(
      parsed.wslBackendEnabled === true ||
      (parsed.wslBackendEnabled === undefined && parsed.wslMode === "wsl");
  
@@ -2752,7 +2856,7 @@ index 19fcf0e7..cea911e5 100644
    return {
      localEnvironmentEnabled: parsed.localEnvironmentEnabled !== false,
      linuxPasswordStore: normalizeLinuxPasswordStorePreference(parsed.linuxPasswordStore),
-@@ -239,9 +284,13 @@ function normalizeDesktopSettingsDocument(
+@@ -241,9 +286,13 @@ function normalizeDesktopSettingsDocument(
      tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
      tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
      updateChannel: updateChannelConfiguredByUser
@@ -2767,7 +2871,7 @@ index 19fcf0e7..cea911e5 100644
      wslBackendEnabled,
      wslDistro: normalizeWslDistro(parsed.wslDistro),
      wslOnly: parsed.wslOnly === true,
-@@ -282,6 +331,18 @@ function toDesktopSettingsDocument(
+@@ -284,6 +333,18 @@ function toDesktopSettingsDocument(
    if (settings.updateChannelConfiguredByUser !== defaults.updateChannelConfiguredByUser) {
      document.updateChannelConfiguredByUser = settings.updateChannelConfiguredByUser;
    }
@@ -2786,7 +2890,7 @@ index 19fcf0e7..cea911e5 100644
    if (settings.wslBackendEnabled !== defaults.wslBackendEnabled) {
      document.wslBackendEnabled = settings.wslBackendEnabled;
    }
-@@ -353,6 +414,37 @@ function setUpdateChannel(
+@@ -355,6 +416,37 @@ function setUpdateChannel(
        };
  }
  
@@ -2824,7 +2928,7 @@ index 19fcf0e7..cea911e5 100644
  function setWslBackendEnabled(settings: DesktopSettings, enabled: boolean): DesktopSettings {
    return settings.wslBackendEnabled === enabled
      ? settings
-@@ -406,13 +498,41 @@ function readSettings(
+@@ -408,13 +500,41 @@ function readSettings(
          onSome: (raw) =>
            decodeDesktopSettingsJson(raw).pipe(
              Effect.map((parsed) => normalizeDesktopSettingsDocument(parsed, appVersion)),
@@ -2867,7 +2971,7 @@ index 19fcf0e7..cea911e5 100644
  const writeSettings = Effect.fn("desktop.settings.writeSettings")(function* (input: {
    readonly fileSystem: FileSystem.FileSystem;
    readonly path: Path.Path;
-@@ -548,6 +668,10 @@ export const make = Effect.gen(function* () {
+@@ -562,6 +682,10 @@ export const make = Effect.gen(function* () {
        persist((settings) => setUpdateChannel(settings, channel)).pipe(
          Effect.withSpan("desktop.settings.setUpdateChannel", { attributes: { channel } }),
        ),
@@ -2878,7 +2982,7 @@ index 19fcf0e7..cea911e5 100644
      setWslBackendEnabled: (enabled) =>
        persist((settings) => setWslBackendEnabled(settings, enabled)).pipe(
          Effect.withSpan("desktop.settings.setWslBackendEnabled", { attributes: { enabled } }),
-@@ -603,6 +727,7 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
+@@ -617,6 +741,7 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
            update((settings) => setServerExposureMode(settings, mode)),
          setTailscaleServe: (input) => update((settings) => setTailscaleServe(settings, input)),
          setUpdateChannel: (channel) => update((settings) => setUpdateChannel(settings, channel)),
@@ -2887,10 +2991,10 @@ index 19fcf0e7..cea911e5 100644
            update((settings) => setWslBackendEnabled(settings, enabled)),
          setWslDistro: (distro) => update((settings) => setWslDistro(settings, distro)),
 diff --git a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
-index cef90b29..da3b77d9 100644
+index 14403f8c6..2fc5e7519 100644
 --- a/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
 +++ b/apps/desktop/src/telemetry/DesktopTelemetryPublisher.test.ts
-@@ -428,6 +428,12 @@ describe("DesktopTelemetryPublisher", () => {
+@@ -450,6 +450,12 @@ describe("DesktopTelemetryPublisher", () => {
              enabled: true,
              status: "up-to-date",
              channel: "latest",
@@ -2904,7 +3008,7 @@ index cef90b29..da3b77d9 100644
              hostArch: "arm64",
              appArch: "arm64",
 diff --git a/apps/desktop/src/updates/DesktopUpdates.test.ts b/apps/desktop/src/updates/DesktopUpdates.test.ts
-index 9745662c..fc6f294b 100644
+index 9745662c1..fc6f294bf 100644
 --- a/apps/desktop/src/updates/DesktopUpdates.test.ts
 +++ b/apps/desktop/src/updates/DesktopUpdates.test.ts
 @@ -849,6 +849,139 @@ describe("DesktopUpdates", () => {
@@ -3048,7 +3152,7 @@ index 9745662c..fc6f294b 100644
      const diskFailure = new Error("disk exploded");
      const settingsFailure = new DesktopAppSettings.DesktopSettingsWriteError({
 diff --git a/apps/desktop/src/updates/DesktopUpdates.ts b/apps/desktop/src/updates/DesktopUpdates.ts
-index 245925a6..58097b96 100644
+index 245925a6e..58097b96d 100644
 --- a/apps/desktop/src/updates/DesktopUpdates.ts
 +++ b/apps/desktop/src/updates/DesktopUpdates.ts
 @@ -1,6 +1,7 @@
@@ -3517,7 +3621,7 @@ index 245925a6..58097b96 100644
        yield* Effect.annotateCurrentSpan({ reason });
        if (!(yield* Ref.get(updaterConfiguredRef))) {
 diff --git a/apps/desktop/src/updates/releaseNotes.test.ts b/apps/desktop/src/updates/releaseNotes.test.ts
-index 57d185c0..dee99b82 100644
+index 57d185c09..dee99b82a 100644
 --- a/apps/desktop/src/updates/releaseNotes.test.ts
 +++ b/apps/desktop/src/updates/releaseNotes.test.ts
 @@ -22,6 +22,7 @@ describe("normalizeDesktopUpdateReleaseNotes", () => {
@@ -3649,7 +3753,7 @@ index 57d185c0..dee99b82 100644
      expect(result).toEqual({
        releaseNotes: [{ version: "1.0.0", items: ["Broken entity &#9999999999;"], totalItems: 1 }],
 diff --git a/apps/desktop/src/updates/releaseNotes.ts b/apps/desktop/src/updates/releaseNotes.ts
-index 3cab5f15..4d314599 100644
+index 3cab5f15e..4d314599d 100644
 --- a/apps/desktop/src/updates/releaseNotes.ts
 +++ b/apps/desktop/src/updates/releaseNotes.ts
 @@ -1,6 +1,6 @@
@@ -3678,7 +3782,7 @@ index 3cab5f15..4d314599 100644
    const normalizedNotes = rawNotes.flatMap((entry) => {
      const { items, totalItems } = extractReleaseNoteItems(entry.note);
 diff --git a/apps/desktop/src/updates/remoteUpdateFlow.test.ts b/apps/desktop/src/updates/remoteUpdateFlow.test.ts
-index 7fd50a82..380f1bff 100644
+index 7fd50a82f..380f1bffb 100644
 --- a/apps/desktop/src/updates/remoteUpdateFlow.test.ts
 +++ b/apps/desktop/src/updates/remoteUpdateFlow.test.ts
 @@ -16,6 +16,12 @@ function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateSt
@@ -3695,7 +3799,7 @@ index 7fd50a82..380f1bff 100644
      hostArch: "arm64",
      appArch: "arm64",
 diff --git a/apps/desktop/src/updates/updateChannels.test.ts b/apps/desktop/src/updates/updateChannels.test.ts
-index acf4155f..439b38b4 100644
+index acf4155fa..439b38b46 100644
 --- a/apps/desktop/src/updates/updateChannels.test.ts
 +++ b/apps/desktop/src/updates/updateChannels.test.ts
 @@ -1,6 +1,20 @@
@@ -3937,7 +4041,7 @@ index acf4155f..439b38b4 100644
    });
  });
 diff --git a/apps/desktop/src/updates/updateChannels.ts b/apps/desktop/src/updates/updateChannels.ts
-index e7f9a2f8..fead4659 100644
+index e7f9a2f85..fead46594 100644
 --- a/apps/desktop/src/updates/updateChannels.ts
 +++ b/apps/desktop/src/updates/updateChannels.ts
 @@ -1,18 +1,237 @@
@@ -4182,7 +4286,7 @@ index e7f9a2f8..fead4659 100644
 +  return false;
  }
 diff --git a/apps/desktop/src/updates/updateMachine.ts b/apps/desktop/src/updates/updateMachine.ts
-index 85d8782e..3cb16b33 100644
+index 85d8782ea..3cb16b333 100644
 --- a/apps/desktop/src/updates/updateMachine.ts
 +++ b/apps/desktop/src/updates/updateMachine.ts
 @@ -5,6 +5,8 @@ import type {
@@ -4218,7 +4322,7 @@ index 85d8782e..3cb16b33 100644
      hostArch: runtimeInfo.hostArch,
      appArch: runtimeInfo.appArch,
 diff --git a/apps/desktop/src/updates/updatesTestHarness.ts b/apps/desktop/src/updates/updatesTestHarness.ts
-index 5455f160..8f13230c 100644
+index 5455f1602..8f13230c5 100644
 --- a/apps/desktop/src/updates/updatesTestHarness.ts
 +++ b/apps/desktop/src/updates/updatesTestHarness.ts
 @@ -34,6 +34,7 @@ export interface UpdatesHarnessOptions {
@@ -4259,7 +4363,7 @@ index 5455f160..8f13230c 100644
            setWslDistro: () => Effect.die("unexpected WSL distro change"),
            setLocalEnvironmentEnabled: () => Effect.die("unexpected local environment toggle"),
 diff --git a/apps/desktop/src/window/DesktopApplicationMenu.test.ts b/apps/desktop/src/window/DesktopApplicationMenu.test.ts
-index d24ffdcb..ea2f7b01 100644
+index d24ffdcba..ea2f7b019 100644
 --- a/apps/desktop/src/window/DesktopApplicationMenu.test.ts
 +++ b/apps/desktop/src/window/DesktopApplicationMenu.test.ts
 @@ -65,6 +65,7 @@ const desktopUpdatesLayer = Layer.succeed(DesktopUpdates.DesktopUpdates, {
@@ -4271,10 +4375,10 @@ index d24ffdcb..ea2f7b01 100644
    download: Effect.die("unexpected download"),
    install: Effect.die("unexpected install"),
 diff --git a/apps/desktop/src/window/DesktopWindow.test.ts b/apps/desktop/src/window/DesktopWindow.test.ts
-index 5df400b9..793fc38f 100644
+index ecf1e386f..766b2b287 100644
 --- a/apps/desktop/src/window/DesktopWindow.test.ts
 +++ b/apps/desktop/src/window/DesktopWindow.test.ts
-@@ -254,6 +254,7 @@ function makeTestLayer(input: {
+@@ -255,6 +255,7 @@ function makeTestLayer(input: {
      setServerExposureMode: () => Effect.die("unexpected server exposure update"),
      setTailscaleServe: () => Effect.die("unexpected Tailscale Serve update"),
      setUpdateChannel: () => Effect.die("unexpected update channel change"),
@@ -4283,10 +4387,10 @@ index 5df400b9..793fc38f 100644
      setWslDistro: () => Effect.die("unexpected WSL distro change"),
      setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
 diff --git a/apps/mobile/src/components/BrandMark.tsx b/apps/mobile/src/components/BrandMark.tsx
-index c8f1d438..886152be 100644
+index 1643f3f6f..f2acf1223 100644
 --- a/apps/mobile/src/components/BrandMark.tsx
 +++ b/apps/mobile/src/components/BrandMark.tsx
-@@ -14,10 +14,16 @@ const BRAND_MARK_SOURCE =
+@@ -9,10 +9,16 @@ const appVariant = Constants.expoConfig?.extra?.appVariant;
  const DEFAULT_STAGE_LABEL =
    appVariant === "development" ? "Dev" : appVariant === "preview" ? "Preview" : "Alpha";
  
@@ -4304,7 +4408,7 @@ index c8f1d438..886152be 100644
  
    return (
      <View className="flex-row items-center gap-3">
-@@ -32,7 +38,9 @@ export function BrandMark(props: { readonly compact?: boolean; readonly stageLab
+@@ -27,7 +33,9 @@ export function BrandMark(props: { readonly compact?: boolean; readonly stageLab
        />
        <View className="gap-1">
          <View className="flex-row items-center gap-2">
@@ -4316,7 +4420,7 @@ index c8f1d438..886152be 100644
              <Text className="text-3xs font-t3-bold tracking-[1.1px] uppercase text-foreground-muted">
                {stageLabel}
 diff --git a/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts b/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
-index ea89f45e..a99e6e94 100644
+index ea89f45e6..a99e6e945 100644
 --- a/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
 +++ b/apps/server/src/desktopUpdate/DesktopAppUpdate.test.ts
 @@ -18,6 +18,8 @@ function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateSt
@@ -4329,7 +4433,7 @@ index ea89f45e..a99e6e94 100644
      hostArch: "arm64",
      appArch: "arm64",
 diff --git a/apps/web/src/components/desktopUpdate.logic.test.ts b/apps/web/src/components/desktopUpdate.logic.test.ts
-index fcc97825..0dc513b1 100644
+index fcc97825b..0dc513b11 100644
 --- a/apps/web/src/components/desktopUpdate.logic.test.ts
 +++ b/apps/web/src/components/desktopUpdate.logic.test.ts
 @@ -6,11 +6,13 @@ import {
@@ -4417,7 +4521,7 @@ index fcc97825..0dc513b1 100644
 +  });
 +});
 diff --git a/apps/web/src/components/desktopUpdate.logic.ts b/apps/web/src/components/desktopUpdate.logic.ts
-index 4a169cb3..83d1d0de 100644
+index 4a169cb3e..83d1d0de3 100644
 --- a/apps/web/src/components/desktopUpdate.logic.ts
 +++ b/apps/web/src/components/desktopUpdate.logic.ts
 @@ -1,4 +1,8 @@
@@ -4504,7 +4608,7 @@ index 4a169cb3..83d1d0de 100644
  
  export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
 diff --git a/apps/web/src/components/desktopUpdate.toast.test.tsx b/apps/web/src/components/desktopUpdate.toast.test.tsx
-index 0d1ba396..ae03bdd7 100644
+index 0d1ba3961..ae03bdd72 100644
 --- a/apps/web/src/components/desktopUpdate.toast.test.tsx
 +++ b/apps/web/src/components/desktopUpdate.toast.test.tsx
 @@ -43,6 +43,12 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
@@ -4544,7 +4648,7 @@ index 0d1ba396..ae03bdd7 100644
      showDesktopUpdateDownloadedToast(
        { openExternal: vi.fn() },
 diff --git a/apps/web/src/components/desktopUpdate.toast.tsx b/apps/web/src/components/desktopUpdate.toast.tsx
-index 0c4991c1..79c11839 100644
+index 0c4991c17..79c118392 100644
 --- a/apps/web/src/components/desktopUpdate.toast.tsx
 +++ b/apps/web/src/components/desktopUpdate.toast.tsx
 @@ -3,7 +3,7 @@ import { ArrowRightIcon } from "lucide-react";
@@ -4578,7 +4682,7 @@ index 0c4991c1..79c11839 100644
      ),
 diff --git a/apps/web/src/components/forkHub.logic.test.ts b/apps/web/src/components/forkHub.logic.test.ts
 new file mode 100644
-index 00000000..749d2155
+index 000000000..749d2155f
 --- /dev/null
 +++ b/apps/web/src/components/forkHub.logic.test.ts
 @@ -0,0 +1,221 @@
@@ -4805,7 +4909,7 @@ index 00000000..749d2155
 +});
 diff --git a/apps/web/src/components/forkHub.logic.ts b/apps/web/src/components/forkHub.logic.ts
 new file mode 100644
-index 00000000..9f0c5386
+index 000000000..9f0c5386c
 --- /dev/null
 +++ b/apps/web/src/components/forkHub.logic.ts
 @@ -0,0 +1,253 @@
@@ -5063,7 +5167,7 @@ index 00000000..9f0c5386
 +  return { owner, repo, releaseCount: releases.length, latestTag, hasStableTrain, hasNightlyTrain };
 +}
 diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
-index fc5082fc..4d230c57 100644
+index 1104f875f..8d01d9088 100644
 --- a/apps/web/src/components/settings/SettingsPanels.tsx
 +++ b/apps/web/src/components/settings/SettingsPanels.tsx
 @@ -8,6 +8,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -5076,7 +5180,7 @@ index fc5082fc..4d230c57 100644
    ProviderDriverKind,
    type ProviderInstanceId,
    type ScopedThreadRef,
-@@ -53,10 +56,18 @@ import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../..
+@@ -56,10 +59,18 @@ import { IS_NIGHTLY_BUILD, NightlyMobileBetaRow } from "../NightlyMobileBeta";
  import {
    canCheckForUpdate,
    getDesktopUpdateButtonTooltip,
@@ -5095,7 +5199,7 @@ index fc5082fc..4d230c57 100644
  import { ProviderModelPicker } from "../chat/ProviderModelPicker";
  import { TraitsPicker } from "../chat/TraitsPicker";
  import {
-@@ -276,14 +287,33 @@ function AboutVersionTitle() {
+@@ -275,14 +286,33 @@ function AboutVersionTitle() {
    );
  }
  
@@ -5126,10 +5230,10 @@ index fc5082fc..4d230c57 100644
 +  const storedForkhubRepo = updateState?.forkhubRepo ?? null;
 +  const forkhubOwnerValue = forkhubOwnerInput ?? storedForkhubOwner ?? "";
 +  const isCheckingForkhubOwner = forkhubCheck.status === "checking";
- 
-   const handleUpdateChannelChange = useCallback(
-     (channel: DesktopUpdateChannel) => {
-@@ -304,7 +334,7 @@ function AboutVersionSection() {
+   // Show the beta app links as soon as someone picks Nightly, before the update installs.
+   const showNightlyMobileBeta =
+     IS_NIGHTLY_BUILD || (hasDesktopBridge && selectedUpdateChannel === "nightly");
+@@ -306,7 +336,7 @@ function AboutVersionSection() {
              stackedThreadToast({
                type: "error",
                title: "Could not change update track",
@@ -5138,7 +5242,7 @@ index fc5082fc..4d230c57 100644
              }),
            );
          })
-@@ -315,6 +345,99 @@ function AboutVersionSection() {
+@@ -317,6 +347,99 @@ function AboutVersionSection() {
      [selectedUpdateChannel],
    );
  
@@ -5238,7 +5342,7 @@ index fc5082fc..4d230c57 100644
    const handleButtonClick = useCallback(async () => {
      const bridge = window.desktopBridge;
      if (!bridge) return;
-@@ -444,37 +567,252 @@ function AboutVersionSection() {
+@@ -446,37 +569,252 @@ function AboutVersionSection() {
          }
        />
        {hasDesktopBridge ? (
@@ -5521,7 +5625,7 @@ index fc5082fc..4d230c57 100644
          <SettingsRow
            title="Update track"
 diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
-index af4bd8a1..ecb0ed37 100644
+index ce2ef2629..a021c0815 100644
 --- a/apps/web/src/components/sidebar/SidebarChrome.tsx
 +++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
 @@ -5,6 +5,7 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
@@ -5529,11 +5633,11 @@ index af4bd8a1..ecb0ed37 100644
  import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
  import { cn } from "../../lib/utils";
 +import { useDesktopUpdateState } from "../../state/desktopUpdate";
- import { useEnvironments } from "../../state/environments";
+ import { usePullRequestsSupported } from "../../state/environments";
  import { T3Wordmark } from "../T3Wordmark";
  import {
-@@ -76,9 +77,11 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
- });
+@@ -108,9 +109,11 @@ export function SidebarBrandWidthProbe({
+ }
  
  function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
 +  const updateState = useDesktopUpdateState();
@@ -5545,26 +5649,35 @@ index af4bd8a1..ecb0ed37 100644
        className={cn(
          "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2 md:flex",
          onBackdrop ? "text-white" : "text-foreground",
-@@ -96,6 +99,17 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
-         >
-           Code
-         </span>
-+        {isForkHub ? (
-+          <span
-+            className={cn(
-+              "truncate text-xs font-semibold tracking-tight [text-box:trim-both_cap_alphabetic]",
-+              onBackdrop ? "text-white/70" : "text-muted-foreground",
-+            )}
-+            aria-hidden="true"
-+          >
-+            x ForkHub
-+          </span>
-+        ) : null}
+@@ -123,6 +126,8 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+ }
+ 
+ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
++  const updateState = useDesktopUpdateState();
++  const isForkHub = updateState?.isForkHubBuild ?? false;
+   return (
+     // Center the visible capitals, without the font's ascender/descender space.
+     <span className="inline-flex min-w-0 items-baseline gap-1 text-sm font-medium tracking-tight">
+@@ -135,6 +140,17 @@ function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
+       >
+         Code
        </span>
-     </Link>
++      {isForkHub ? (
++        <span
++          className={cn(
++            "truncate text-xs font-semibold tracking-tight [text-box:trim-both_cap_alphabetic]",
++            onBackdrop ? "text-white/70" : "text-muted-foreground",
++          )}
++          aria-hidden="true"
++        >
++          x ForkHub
++        </span>
++      ) : null}
+     </span>
    );
+ }
 diff --git a/apps/web/src/components/sidebar/SidebarUpdatePill.test.tsx b/apps/web/src/components/sidebar/SidebarUpdatePill.test.tsx
-index d3c6f368..97f6fae5 100644
+index d3c6f368a..97f6fae58 100644
 --- a/apps/web/src/components/sidebar/SidebarUpdatePill.test.tsx
 +++ b/apps/web/src/components/sidebar/SidebarUpdatePill.test.tsx
 @@ -11,6 +11,12 @@ const nightlyState: DesktopUpdateState = {
@@ -5604,7 +5717,7 @@ index d3c6f368..97f6fae5 100644
      ).toBe(false);
      expect(
 diff --git a/apps/web/src/components/sidebar/SidebarUpdatePill.tsx b/apps/web/src/components/sidebar/SidebarUpdatePill.tsx
-index e9ba2683..ae46be8a 100644
+index e9ba26830..ae46be8ae 100644
 --- a/apps/web/src/components/sidebar/SidebarUpdatePill.tsx
 +++ b/apps/web/src/components/sidebar/SidebarUpdatePill.tsx
 @@ -40,7 +40,11 @@ export function shouldUseSidebarUpdateReleaseNotesPopover(
@@ -5621,7 +5734,7 @@ index e9ba2683..ae46be8a 100644
  
  export function handleSidebarUpdateReleaseNotesPopoverOpenChange(
 diff --git a/apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx b/apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx
-index d229e2d3..0e6307fc 100644
+index d229e2d3c..0e6307fcf 100644
 --- a/apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx
 +++ b/apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx
 @@ -22,6 +22,12 @@ const baseState: DesktopUpdateState = {
@@ -5638,7 +5751,7 @@ index d229e2d3..0e6307fc 100644
    hostArch: "arm64",
    appArch: "arm64",
 diff --git a/apps/web/src/state/desktopUpdate.test.ts b/apps/web/src/state/desktopUpdate.test.ts
-index f3e7818e..99d1ec27 100644
+index 04c13c788..e2d8688b3 100644
 --- a/apps/web/src/state/desktopUpdate.test.ts
 +++ b/apps/web/src/state/desktopUpdate.test.ts
 @@ -9,6 +9,12 @@ const baseState: DesktopUpdateState = {
@@ -5655,7 +5768,7 @@ index f3e7818e..99d1ec27 100644
    hostArch: "x64",
    appArch: "x64",
 diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
-index 700e5184..5c08a8f3 100644
+index db2cc2a36..e507ebcc8 100644
 --- a/packages/contracts/src/ipc.ts
 +++ b/packages/contracts/src/ipc.ts
 @@ -105,6 +105,19 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
@@ -5788,10 +5901,10 @@ index 700e5184..5c08a8f3 100644
    downloadUpdate: () => Promise<DesktopUpdateActionResult>;
    installUpdate: () => Promise<DesktopUpdateActionResult>;
 diff --git a/scripts/build-desktop-artifact.test.ts b/scripts/build-desktop-artifact.test.ts
-index 98ba0aae..2738c0ca 100644
+index aa733d531..d7d622b1e 100644
 --- a/scripts/build-desktop-artifact.test.ts
 +++ b/scripts/build-desktop-artifact.test.ts
-@@ -260,6 +260,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -261,6 +261,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
    it("resolves the dedicated nightly updater channel from nightly versions", () => {
      assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
      assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
@@ -5804,7 +5917,7 @@ index 98ba0aae..2738c0ca 100644
    });
  
    it("switches desktop packaging product names to nightly for nightly builds", () => {
-@@ -267,6 +273,23 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+@@ -268,6 +274,23 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
      assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
    });
  
@@ -5829,10 +5942,10 @@ index 98ba0aae..2738c0ca 100644
      assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17"), {
        macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
 diff --git a/scripts/build-desktop-artifact.ts b/scripts/build-desktop-artifact.ts
-index 5b22fddb..c0c642e8 100644
+index f8f5a6ca2..4357a798c 100644
 --- a/scripts/build-desktop-artifact.ts
 +++ b/scripts/build-desktop-artifact.ts
-@@ -2536,7 +2536,7 @@ export function resolveDesktopRuntimeDependencies(
+@@ -2565,7 +2565,7 @@ export function resolveDesktopRuntimeDependencies(
  }
  
  export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
@@ -5841,7 +5954,7 @@ index 5b22fddb..c0c642e8 100644
  ) {
    const env = yield* Config.all({
      updateRepository: Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
-@@ -2562,7 +2562,10 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
+@@ -2591,7 +2591,10 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
  });
  
  export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
@@ -5853,7 +5966,7 @@ index 5b22fddb..c0c642e8 100644
  }
  
  // Pull request builds (`-pr.<n>.`) and the maintainers' preview train
-@@ -2581,6 +2584,9 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
+@@ -2610,6 +2613,9 @@ export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
  }
  
  export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
@@ -5863,7 +5976,7 @@ index 5b22fddb..c0c642e8 100644
    if (resolveDesktopUpdateChannel(version) === "nightly") {
      return {
        macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-@@ -2613,7 +2619,23 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
+@@ -2642,7 +2648,23 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
    return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
  }
  

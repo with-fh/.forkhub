@@ -5,7 +5,7 @@ target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
 target_area: [electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/main.ts, src/components/AboutSection.tsx, src/components/ui/ConnectCalendarButton.tsx, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs]
 status: draft
 applied_upstream_pr: none
-version: 2
+version: 3
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -13,7 +13,7 @@ owners: [Imamuzzaki Abu Salam]
 source_url: null
 imported_at: null
 created: 2026-09-30
-last_realized_against_commit: a2485e4
+last_realized_against_commit: b439c1f0
 verifies_with: node --test (focused suites, see verify.sh)
 ---
 

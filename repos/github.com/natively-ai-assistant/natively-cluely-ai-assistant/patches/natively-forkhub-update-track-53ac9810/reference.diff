@@ -1,34 +1,27 @@
-diff --git a/electron/IntelligenceEngine.ts b/electron/IntelligenceEngine.ts
-index d2ae2a2..88a024b 100644
---- a/electron/IntelligenceEngine.ts
-+++ b/electron/IntelligenceEngine.ts
-@@ -62,7 +62,20 @@ import { recordAttribution } from './intelligence/IntelligenceAttribution';
- // tsc collapsed the grounding result to `{}`. Naming it restores genuine checking on
- // the seven property reads below instead of masking them with a cast.
- // Follow-up: type getKnowledgeOrchestrator() properly and drop this import.
--import type { PromptAssemblyResult } from '../premium/electron/knowledge/ContextAssembler';
-+// FORKHUB-OSS: the premium import below only resolves with the private
-+// premium/ submodule checked out, which open-source / fork builds omit.
-+// The same shape is named locally so `tsc` passes without it — every
-+// property read below stays name-checked; only the declaration site
-+// differs. (Keep in sync with premium/.../ContextAssembler.ts if it gains
-+// fields. `tsc` + `build:electron` both pass with this in place.)
-+// import type { PromptAssemblyResult } from '../premium/electron/knowledge/ContextAssembler';
-+type PromptAssemblyResult = {
-+  factualRecall?: boolean;
-+  liveNegotiationResponse?: unknown;
-+  contextBlock?: string;
-+  isIntroQuestion?: boolean;
-+  introResponse?: string;
-+};
- 
- // Mode types
- export type IntelligenceMode = 'idle' | 'assist' | 'what_to_say' | 'follow_up' | 'recap' | 'clarify' | 'manual' | 'follow_up_questions' | 'code_hint' | 'brainstorm';
 diff --git a/electron/ipcHandlers.ts b/electron/ipcHandlers.ts
-index 045bcce..33b07d7 100644
+index 360ee018..20ed4029 100644
 --- a/electron/ipcHandlers.ts
 +++ b/electron/ipcHandlers.ts
-@@ -492,13 +492,20 @@ export function initializeIpcHandlers(appState: AppState): void {
+@@ -457,7 +457,17 @@ export function initializeIpcHandlers(appState: AppState): void {
+       const orchestrator = appState.getKnowledgeOrchestrator();
+       if (!orchestrator) return;
+       orchestrator.setKnowledgeMode(false);
+-      const { DocType } = require('../premium/electron/knowledge/types');
++      // FORKHUB-OSS: try-wrapped so esbuild leaves this require unbundled
++      // and `build:electron` succeeds without the private premium/
++      // submodule (see electron/premium/featureGate.ts). Unreachable in
++      // practice — without premium there is no orchestrator (returned above).
++      let DocType: any;
++      try {
++        DocType = require('../premium/electron/knowledge/types').DocType;
++      } catch {
++        console.warn('[IPC] trial wipe: premium knowledge types unavailable; skipping document wipe');
++        return;
++      }
+       orchestrator.deleteDocumentsByType(DocType.RESUME);
+       orchestrator.deleteDocumentsByType(DocType.JD);
+       // …and their raw-text indexes (text + vectors under profile:<kind>:<version>).
+@@ -1181,13 +1191,20 @@ export function initializeIpcHandlers(appState: AppState): void {
    });
    safeHandle('license:get-hardware-id', async () => {
      try {
@@ -51,7 +44,7 @@ index 045bcce..33b07d7 100644
    safeHandle('get-recognition-languages', async () => {
      return RECOGNITION_LANGUAGES;
    });
-@@ -7276,29 +7283,27 @@ export function initializeIpcHandlers(appState: AppState): void {
+@@ -11998,30 +12015,29 @@ export function initializeIpcHandlers(appState: AppState): void {
        const { CredentialsManager } = require('./services/CredentialsManager');
        const cm = CredentialsManager.getInstance();
  
@@ -84,36 +77,37 @@ index 045bcce..33b07d7 100644
 -        hwid = LicenseManager.getInstance().getHardwareId() || '';
 -      } catch {
 -        /* LicenseManager not available — handled by the guard below */
--      }
--      if (!hwid || hwid === 'unavailable') {
--        console.error('[Trial] Refusing to start a trial without a real hardware id (native module unavailable).');
--        return { ok: false, error: 'hardware_id_unavailable' };
 +        hwid = getStableHardwareId();
 +      } catch (err: any) {
 +        console.error('[IPC] trial:start: no stable hardware id:', err?.message);
++        reportStart({ hwidUnavailable: true });
 +        return { ok: false, error: 'invalid_hwid' };
-+      }
+       }
+-      if (!hwid || hwid === 'unavailable') {
+-        console.error('[Trial] Refusing to start a trial without a real hardware id (native module unavailable).');
 +      if (isPlaceholderHardwareId(hwid)) {
 +        // Fail closed (upstream F-601): a trial that cannot be bound to
 +        // this machine must not start.
 +        console.error('[IPC] trial:start: refusing placeholder hardware id');
+         reportStart({ hwidUnavailable: true });
+-        return { ok: false, error: 'hardware_id_unavailable' };
 +        return { ok: false, error: 'invalid_hwid' };
        }
  
-       const res = await fetch('https://api.natively.software/v1/trial/start', {
+       // install_id / app_version / platform let the server tie this trial to
 diff --git a/electron/main.ts b/electron/main.ts
-index e2c9999..b063486 100644
+index 506b10de..5f79dd86 100644
 --- a/electron/main.ts
 +++ b/electron/main.ts
-@@ -18,6 +18,7 @@ import { SystemAudioHealthClassifier } from "./audio/systemAudioHealthClassifier
- import { FatalMainProcessCoordinator } from "./utils/fatalMainProcess"
+@@ -26,6 +26,7 @@ import { installResilientDnsLookup } from "./utils/resilientDnsLookup"
+ import { resolveDebugLogPath } from "./utils/debugLogPath.mjs"
  import { MeetingLifecycleQueue, type MeetingLifecycleState } from "./audio/meetingLifecycleQueue"
  import { autoUpdater } from "electron-updater"
 +import { extractVersionFromTag, getUpdateFeed, isForkCounterUpgrade } from "./update/updateFeed"
+ import { summarizeUpdateDownload } from "./update/updateDownloadSummary"
  
  import {
-   classifyServiceAccountFile,
-@@ -2787,6 +2788,18 @@ export class AppState {
+@@ -2963,6 +2964,18 @@ export class AppState {
      autoUpdater.allowDowngrade = false
      console.log(`[AutoUpdater] Channel: ${autoUpdater.channel} (allowDowngrade=${autoUpdater.allowDowngrade})`)
  
@@ -132,7 +126,7 @@ index e2c9999..b063486 100644
      autoUpdater.on("checking-for-update", () => {
        console.log("[AutoUpdater] Checking for update...")
        this.broadcast("update-checking")
-@@ -2889,8 +2902,11 @@ export class AppState {
+@@ -3075,8 +3088,11 @@ export class AppState {
  
        if (notes) {
          const currentVersion = app.getVersion();
@@ -146,7 +140,7 @@ index e2c9999..b063486 100644
  
          console.log(`[AutoUpdater] Manual Check: Current=${currentVersion}, Latest=${latestVersion}`);
  
-@@ -2941,6 +2957,16 @@ export class AppState {
+@@ -3127,6 +3143,16 @@ export class AppState {
        if (lv > cv) return true;
        if (lv < cv) return false;
      }
@@ -163,7 +157,7 @@ index e2c9999..b063486 100644
      // F-708: same equal-after-stripping case as isRealUpgrade — a prerelease is
      // older than the stable of the same version, so beta -> stable is newer.
      if (/-/.test(current) && !/-/.test(latest)) return true;
-@@ -2983,6 +3009,17 @@ export class AppState {
+@@ -3169,6 +3195,17 @@ export class AppState {
        if (r[i] > c[i]) return true
        if (r[i] < c[i]) return false
      }
@@ -182,10 +176,10 @@ index e2c9999..b063486 100644
      // BOTH operands makes 2.1.0-beta.2 -> 2.1.0 compare equal, so a user on a
      // prerelease was told "update not available" for the matching stable and
 diff --git a/electron/preload.ts b/electron/preload.ts
-index 4339558..124846f 100644
+index 9416bec1..6dd5ee8f 100644
 --- a/electron/preload.ts
 +++ b/electron/preload.ts
-@@ -708,6 +708,7 @@ interface ElectronAPI {
+@@ -892,6 +892,7 @@ interface ElectronAPI {
    checkForUpdates: () => Promise<void>;
    downloadUpdate: () => Promise<void>;
    getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>;
@@ -193,7 +187,7 @@ index 4339558..124846f 100644
    testReleaseFetch: () => Promise<{ success: boolean; error?: string }>;
  
    // RAG (Retrieval-Augmented Generation) API
-@@ -2348,6 +2349,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
+@@ -2806,6 +2807,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
    checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
    downloadUpdate: () => ipcRenderer.invoke('download-update'),
    getCanAutoUpdate: () => ipcRenderer.invoke('get-can-auto-update'),
@@ -203,7 +197,7 @@ index 4339558..124846f 100644
    // RAG API
 diff --git a/electron/services/HardwareId.ts b/electron/services/HardwareId.ts
 new file mode 100644
-index 0000000..a233eb2
+index 00000000..a233eb2c
 --- /dev/null
 +++ b/electron/services/HardwareId.ts
 @@ -0,0 +1,194 @@
@@ -403,7 +397,7 @@ index 0000000..a233eb2
 +}
 diff --git a/electron/services/__tests__/HardwareId.test.mjs b/electron/services/__tests__/HardwareId.test.mjs
 new file mode 100644
-index 0000000..893bb87
+index 00000000..893bb877
 --- /dev/null
 +++ b/electron/services/__tests__/HardwareId.test.mjs
 @@ -0,0 +1,38 @@
@@ -446,24 +440,10 @@ index 0000000..893bb87
 +  assert.equal(second, first, 'must be stable across calls in one process');
 +});
 diff --git a/electron/services/resolveCompanySearchProvider.ts b/electron/services/resolveCompanySearchProvider.ts
-index 845deec..2e6d9c9 100644
+index d2f30ceb..39afdd3b 100644
 --- a/electron/services/resolveCompanySearchProvider.ts
 +++ b/electron/services/resolveCompanySearchProvider.ts
-@@ -8,29 +8,48 @@
- 
- import { TRIAL_SENTINEL_KEY } from '../config/constants';
- import { CredentialsManager } from './CredentialsManager';
--import type { SearchProvider } from '../../premium/electron/knowledge/CompanyResearchEngine';
-+// FORKHUB-OSS: the premium import below only resolves with the private
-+// premium/ submodule checked out. Open-source / fork builds name an opaque
-+// local alias instead — the value flows straight into `any`-typed premium
-+// APIs at the call sites, so no checking is lost. (`tsc` + `build:electron`
-+// both pass with this in place.)
-+// import type { SearchProvider } from '../../premium/electron/knowledge/CompanyResearchEngine';
-+type SearchProvider = any;
- 
- export function resolveCompanySearchProvider(): SearchProvider | null {
-   const cm = CredentialsManager.getInstance();
+@@ -15,22 +15,35 @@ export function resolveCompanySearchProvider(): SearchProvider | null {
  
    const tavilyApiKey = cm.getTavilyApiKey();
    if (tavilyApiKey) {
@@ -512,10 +492,10 @@ index 845deec..2e6d9c9 100644
  
    return null;
 diff --git a/electron/update/ReleaseNotesManager.test.mjs b/electron/update/ReleaseNotesManager.test.mjs
-index c4d358d..daa9c4a 100644
+index 14cabf33..9f9b820e 100644
 --- a/electron/update/ReleaseNotesManager.test.mjs
 +++ b/electron/update/ReleaseNotesManager.test.mjs
-@@ -34,8 +34,8 @@ test('release notes parser accepts GitHub H3 headings and emoji-decorated titles
+@@ -34,15 +34,17 @@ test('release notes parser accepts GitHub H3 headings and emoji-decorated titles
    ]);
  });
  
@@ -527,23 +507,32 @@ index c4d358d..daa9c4a 100644
 +  assert.equal(manager.repoOwner, process.env.NATIVELY_UPDATE_OWNER || 'with-fh');
 +  assert.equal(manager.repoName, process.env.NATIVELY_UPDATE_REPO || '.forkhub');
  });
+ 
+ test('release notes lookup tries both tag spellings (V2.8.8 is published with a capital V)', () => {
+   const manager = ReleaseNotesManager.getInstance();
+-  const base = 'https://api.github.com/repos/Natively-AI-assistant/natively-cluely-ai-assistant/releases';
++  const owner = process.env.NATIVELY_UPDATE_OWNER || 'with-fh';
++  const repo = process.env.NATIVELY_UPDATE_REPO || '.forkhub';
++  const base = `https://api.github.com/repos/${owner}/${repo}/releases`;
+   for (const version of ['2.8.8', 'v2.8.8', 'V2.8.8']) {
+     assert.deepEqual(manager.buildReleaseUrls(version), [`${base}/tags/v2.8.8`, `${base}/tags/V2.8.8`]);
+   }
 diff --git a/electron/update/ReleaseNotesManager.ts b/electron/update/ReleaseNotesManager.ts
-index 25f5635..fff4090 100644
+index af913bee..44bd2f96 100644
 --- a/electron/update/ReleaseNotesManager.ts
 +++ b/electron/update/ReleaseNotesManager.ts
-@@ -1,5 +1,11 @@
+@@ -1,5 +1,10 @@
  
  import { net } from "electron";
 +import {
 +  UPDATE_CATALOG_TAG_PREFIX,
-+  apiReleaseUrl,
 +  apiReleasesListUrl,
 +  getUpdateFeed,
 +} from "./updateFeed";
  
  const RELEASE_NOTE_BULLET_SECTIONS = new Set(["What's New", "Improvements", "Fixes", "Technical"]);
  const GITHUB_REQUEST_TIMEOUT_MS = 10000;
-@@ -20,8 +26,11 @@ export interface ParsedReleaseNotes {
+@@ -20,8 +25,11 @@ export interface ParsedReleaseNotes {
  export class ReleaseNotesManager {
      private static instance: ReleaseNotesManager;
      private cachedNotes: ParsedReleaseNotes | null = null;
@@ -557,11 +546,16 @@ index 25f5635..fff4090 100644
  
      private constructor() { }
  
-@@ -41,19 +50,24 @@ export class ReleaseNotesManager {
+@@ -41,25 +49,24 @@ export class ReleaseNotesManager {
          console.log(`[ReleaseNotesManager] Fetching release notes for ${version}...`);
  
          try {
--            const response = await this.makeRequest(this.buildReleaseUrl(version));
+-            // Tags are published as both "v2.8.8" and "V2.8.8", and the tags
+-            // endpoint is case-sensitive: try each spelling until one exists.
+-            let response: string | null = null;
+-            for (const url of this.buildReleaseUrls(version)) {
+-                response = await this.makeRequest(url);
+-                if (response) break;
 +            if (version === 'latest') {
 +                const latest = await this.fetchLatestCatalogRelease();
 +                if (!latest) {
@@ -571,7 +565,7 @@ index 25f5635..fff4090 100644
 +                const parsed = this.parseReleaseNotes(latest.body, latest.tag, latest.htmlUrl);
 +                this.cachedNotes = parsed;
 +                return parsed;
-+            }
+             }
  
 -            if (!response) {
 +            const release = await this.fetchReleaseByVersion(version);
@@ -590,16 +584,15 @@ index 25f5635..fff4090 100644
              this.cachedNotes = parsed;
              return parsed;
  
-@@ -63,13 +77,88 @@ export class ReleaseNotesManager {
+@@ -69,6 +76,86 @@ export class ReleaseNotesManager {
          }
      }
  
--    private buildReleaseUrl(version: string): string {
--        if (version === 'latest') {
--            return `https://api.github.com/repos/${this.repoOwner}/${this.repoName}/releases/latest`;
 +    /**
 +     * Newest non-draft catalog release for THIS target (tags are namespaced
 +     * per target inside the shared `.forkhub` catalog — see updateFeed.ts).
++     * NOTE: intentionally NOT `/releases/latest` — in a shared per-owner
++     * catalog "latest" is whatever target released most recently.
 +     */
 +    private async fetchLatestCatalogRelease(): Promise<{ body: string; htmlUrl: string; tag: string } | null> {
 +        const listUrl = apiReleasesListUrl();
@@ -631,35 +624,27 @@ index 25f5635..fff4090 100644
 +    }
 +
 +    /**
-+     * Release body for an exact app version. The updater reports versions
-+     * like `2.8.1-fh.imbios.1` while catalog tags are namespaced
-+     * (`...--v2.8.1-fh1`), so after the direct tag lookups we fall back to a
-+     * catalog-list search on the numeric base version.
++     * Release body for an exact app version. Tries the direct tag lookups
++     * first (both `v`/`V` spellings — the tags endpoint is case-sensitive),
++     * then falls back to a catalog-list search on the numeric base version:
++     * the updater reports versions like `2.8.1-fh.imbios.1` while catalog
++     * tags are namespaced (`...--v2.8.1-fh1`).
 +     */
 +    private async fetchReleaseByVersion(version: string): Promise<{ body: string; htmlUrl: string; tag: string } | null> {
-+        const candidates = version.startsWith('v') ? [version] : [`v${version}`, version];
-+        for (const tag of candidates) {
-+            let url: string;
-+            try {
-+                url = apiReleaseUrl(tag);
-+            } catch {
-+                url = `https://api.github.com/repos/${this.repoOwner}/${this.repoName}/releases/tags/${tag}`;
-+            }
++        for (const url of this.buildReleaseUrls(version)) {
 +            const response = await this.makeRequest(url);
 +            if (response) {
 +                try {
 +                    const data = JSON.parse(response);
-+                    return { body: data.body || "", htmlUrl: data.html_url || "", tag: data.tag_name || tag };
++                    return { body: data.body || "", htmlUrl: data.html_url || "", tag: data.tag_name || version };
 +                } catch {
 +                    /* malformed body — try next candidate */
 +                }
 +            }
-         }
- 
--        const tag = version.startsWith('v') ? version : `v${version}`;
--        return `https://api.github.com/repos/${this.repoOwner}/${this.repoName}/releases/tags/${tag}`;
++        }
++
 +        // Suffix-tolerant fallback: `2.8.1-fh.imbios.1` → tag containing `2.8.1`.
-+        const base = version.replace(/^v/, '').split('-')[0];
++        const base = version.trim().replace(/^v/i, '').split('-')[0];
 +        const listResponse = await this.makeRequest(apiReleasesListUrl());
 +        if (listResponse) {
 +            try {
@@ -681,12 +666,14 @@ index 25f5635..fff4090 100644
 +            }
 +        }
 +        return null;
-     }
- 
-     private parseReleaseNotes(body: string, version: string, url: string): ParsedReleaseNotes {
++    }
++
+     private buildReleaseUrls(version: string): string[] {
+         const base = `https://api.github.com/repos/${this.repoOwner}/${this.repoName}/releases`;
+         if (version === 'latest') return [`${base}/latest`];
 diff --git a/electron/update/updateFeed.test.mjs b/electron/update/updateFeed.test.mjs
 new file mode 100644
-index 0000000..ee8fb1c
+index 00000000..ee8fb1cd
 --- /dev/null
 +++ b/electron/update/updateFeed.test.mjs
 @@ -0,0 +1,51 @@
@@ -743,7 +730,7 @@ index 0000000..ee8fb1c
 +});
 diff --git a/electron/update/updateFeed.ts b/electron/update/updateFeed.ts
 new file mode 100644
-index 0000000..76a113c
+index 00000000..76a113cc
 --- /dev/null
 +++ b/electron/update/updateFeed.ts
 @@ -0,0 +1,130 @@
@@ -878,10 +865,10 @@ index 0000000..76a113c
 +  return !!c && !!r && c.owner === r.owner && r.n > c.n;
 +}
 diff --git a/package.json b/package.json
-index 25b359a..a0919c3 100644
+index c9806cbf..eb8edcfe 100644
 --- a/package.json
 +++ b/package.json
-@@ -240,8 +240,8 @@
+@@ -287,8 +287,8 @@
      "publish": [
        {
          "provider": "github",
@@ -893,39 +880,42 @@ index 25b359a..a0919c3 100644
        }
      ],
 diff --git a/src/components/UpdateBanner.tsx b/src/components/UpdateBanner.tsx
-index 86f3534..a3c8bc2 100644
+index b7990f13..8478c523 100644
 --- a/src/components/UpdateBanner.tsx
 +++ b/src/components/UpdateBanner.tsx
-@@ -14,7 +14,13 @@ type ParsedReleaseNotes = {
+@@ -14,6 +14,20 @@ type ParsedReleaseNotes = {
      url?: string;
  };
  
--const LATEST_RELEASE_URL = 'https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases/latest';
 +const UPSTREAM_OWNER = 'Natively-AI-assistant';
 +const UPSTREAM_REPO = 'natively-cluely-ai-assistant';
 +
++// Manual-download fallback links follow the update feed (ForkHub catalog for
++// fork builds — see electron/update/updateFeed.ts, exposed via the
++// `get-update-feed` IPC because the renderer cannot read main's env). On fork
++// feeds asset naming is owned by the fork's release workflow, so the latest
++// release page (which always exists) is linked instead of a guessed asset URL
++// that may 404. Unknown feed → upstream links (back-compat default).
 +const latestReleasePageUrl = (feed: { owner: string; repo: string } | null) =>
 +    feed
 +        ? `https://github.com/${feed.owner}/${feed.repo}/releases/latest`
 +        : `https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/releases/latest`;
- 
++
  const UpdateBanner: React.FC = () => {
      const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-@@ -24,8 +30,12 @@ const UpdateBanner: React.FC = () => {
-     const [status, setStatus] = useState<'idle' | 'downloading' | 'ready' | 'error' | 'instructions'>('idle');
-     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-     const [instructionsArch, setInstructionsArch] = useState<'arm64' | 'x64' | null>(null);
-+    // Update feed (ForkHub catalog for fork builds — see
-+    // electron/update/updateFeed.ts). Drives the manual-download fallback
-+    // links; the in-app updater itself is repointed main-side.
-+    const [updateFeed, setUpdateFeed] = useState<{ owner: string; repo: string } | null>(null);
-     // Whether this build can install + relaunch in place (signed macOS build, or
--    // any packaged Windows/Linux build). Drives whether "Install" runs the real
-+    // any packaged Windows/Linux builds). Drives whether "Install" runs the real
-     // in-app download flow or falls back to the manual DMG-download instructions.
+     const [parsedNotes, setParsedNotes] = useState<ParsedReleaseNotes | null>(null);
+@@ -27,6 +41,10 @@ const UpdateBanner: React.FC = () => {
+     // any packaged Windows/Linux build). Drives whether "Install" runs the real
+     // in-app download flow or just opens the release page.
      const [canAutoUpdate, setCanAutoUpdate] = useState(false);
++    // Update feed (ForkHub catalog for fork builds). Drives the
++    // manual-download fallback links; the in-app updater itself is repointed
++    // main-side.
++    const [updateFeed, setUpdateFeed] = useState<{ owner: string; repo: string } | null>(null);
      // Tracks whether the user explicitly dismissed the toast — progress events
-@@ -41,6 +51,12 @@ const UpdateBanner: React.FC = () => {
+     // should not override a deliberate dismiss.
+     const userDismissedRef = useRef(false);
+@@ -43,6 +61,12 @@ const UpdateBanner: React.FC = () => {
                  // Silent failure falls through to default false (manual fallback) — log for observability.
                  console.warn('[UpdateBanner] getCanAutoUpdate failed, using manual fallback:', err);
              });
@@ -938,74 +928,132 @@ index 86f3534..a3c8bc2 100644
          return () => { cancelled = true; };
      }, []);
  
-@@ -138,13 +154,24 @@ const UpdateBanner: React.FC = () => {
-         }
+@@ -190,9 +214,11 @@ const UpdateBanner: React.FC = () => {
  
-         // FALLBACK (unsigned macOS build): we can't swap+relaunch in place, so send
--        // the user to the signed DMG on GitHub and show the manual-install steps.
-+        // the user to the release download and show the manual-install steps.
-+        // On the upstream feed the DMG asset name is predictable, so link it
-+        // directly; on fork feeds (ForkHub catalog) asset naming is owned by
-+        // the fork's release workflow, so link the latest release page (which
-+        // always exists) instead of guessing an asset URL that may 404.
-         // Guard: if version is absent, fall back to triggering download (which will
-         // surface an error) rather than sending user to a broken GitHub URL.
+         // A macOS build that can't install in place (unsigned: a dev build, or
+         // one built from source) can't be updated from here; release builds are
+-        // signed and never get this far. Send it to the release page instead.
++        // signed and never get this far. Send it to the release page instead —
++        // the fork catalog's latest page on fork feeds (asset naming there is
++        // owned by the fork's release workflow), upstream's otherwise.
          if (window.electronAPI.platform === 'darwin') {
-             if (!updateInfo?.version) {
--                console.warn('[UpdateBanner] No version in updateInfo — opening latest GitHub release instead of in-app download');
--                window.electronAPI.openExternal(LATEST_RELEASE_URL);
-+                console.warn('[UpdateBanner] No version in updateInfo — opening latest release page instead of in-app download');
-+                window.electronAPI.openExternal(latestReleasePageUrl(updateFeed));
-+                setStatus('instructions');
-+                return;
-+            }
-+            const isUpstream =
-+                !updateFeed || (updateFeed.owner === UPSTREAM_OWNER && updateFeed.repo === UPSTREAM_REPO);
-+            if (!isUpstream) {
-+                window.electronAPI.openExternal(latestReleasePageUrl(updateFeed));
-                 setStatus('instructions');
-                 return;
-             }
-@@ -154,12 +181,12 @@ const UpdateBanner: React.FC = () => {
-                 const dmgSuffix = isArm ? 'arm64' : 'x64';
-                 setInstructionsArch(dmgSuffix);
-                 const version = updateInfo.version.replace('v', '');
--                const url = `https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/releases/download/v${version}/Natively-${version}-${dmgSuffix}.dmg`;
-+                const url = `https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/releases/download/v${version}/Natively-${version}-${dmgSuffix}.dmg`;
-                 window.electronAPI.openExternal(url);
-                 setStatus('instructions');
-             } catch (err) {
-                 console.error("Failed to get arch", err);
--                window.electronAPI.openExternal(LATEST_RELEASE_URL);
-+                window.electronAPI.openExternal(latestReleasePageUrl(updateFeed));
-                 setStatus('instructions');
-             }
-         } else {
-diff --git a/src/components/onboarding/OrchestratedToasterHost.tsx b/src/components/onboarding/OrchestratedToasterHost.tsx
-index a65294a..f38d9f5 100644
---- a/src/components/onboarding/OrchestratedToasterHost.tsx
-+++ b/src/components/onboarding/OrchestratedToasterHost.tsx
-@@ -138,7 +138,14 @@ export const OrchestratedToasterHost: React.FC = () => {
-           onDismiss={onDismiss('trial_promo')}
-           onStartTrial={async () => {
-             const res = await window.electronAPI?.startTrial?.();
--            if (!res?.ok) throw new Error(res?.error || 'Could not start trial');
-+            if (!res?.ok) {
-+              // Never surface raw error codes (e.g. `invalid_hwid`) in the UI.
-+              throw new Error(
-+                res?.error === 'invalid_hwid'
-+                  ? 'Could not read device ID. Restart the app and try again.'
-+                  : res?.error || 'Could not start trial'
-+              );
-+            }
-             orch.setUserState({ hasTrialToken: true });
-             onDismiss('trial_promo')();
-           }}
+-            window.electronAPI.openExternal(parsedNotes?.url || LATEST_RELEASE_URL);
++            window.electronAPI.openExternal(parsedNotes?.url || latestReleasePageUrl(updateFeed));
+             handleClose();
+             return;
+         }
+@@ -247,6 +273,7 @@ const UpdateBanner: React.FC = () => {
+             status={status}
+             errorMessage={errorMessage}
+             canAutoUpdate={canAutoUpdate}
++            fallbackReleaseUrl={latestReleasePageUrl(updateFeed)}
+         />
+         </>
+     );
+diff --git a/src/components/UpdateModal.tsx b/src/components/UpdateModal.tsx
+index 970d2ade..cb92c9cb 100644
+--- a/src/components/UpdateModal.tsx
++++ b/src/components/UpdateModal.tsx
+@@ -57,6 +57,9 @@ interface UpdateModalProps {
+     status: 'idle' | 'downloading' | 'ready' | 'error';
+     errorMessage?: string | null;
+     canAutoUpdate?: boolean;
++    /** Feed-driven manual-download fallback (ForkHub catalog page on fork
++        feeds); defaults to the upstream latest-release page. */
++    fallbackReleaseUrl?: string;
+     /** Skip the close genie: the corner toast is taking the card's place. */
+     closeInstantly?: boolean;
+ }
+@@ -320,6 +323,7 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
+     status,
+     errorMessage,
+     closeInstantly = false,
++    fallbackReleaseUrl,
+ }) => {
+     const t = useT();
+     const reduced = useReducedMotion() ?? false;
+@@ -344,7 +348,7 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
+         if (key === 'improvements') return n === 1 ? t('1 improvement') : fill(t('{n} improvements'), { n });
+         return n === 1 ? t('1 fix') : fill(t('{n} fixes'), { n });
+     };
+-    const releaseUrl = parsedNotes?.url || LATEST_RELEASE_URL;
++    const releaseUrl = parsedNotes?.url || fallbackReleaseUrl || LATEST_RELEASE_URL;
+ 
+     const progress = status === 'ready' ? 100 : Math.max(0, Math.min(100, downloadProgress || 0));
+     const busy = status === 'downloading' || status === 'ready';
+diff --git a/src/lib/trial/__tests__/trialStart.test.mjs b/src/lib/trial/__tests__/trialStart.test.mjs
+index 73fd977d..02a94c8f 100644
+--- a/src/lib/trial/__tests__/trialStart.test.mjs
++++ b/src/lib/trial/__tests__/trialStart.test.mjs
+@@ -23,7 +23,8 @@ const rows = [
+   ['server error', { ok: false, error: 'request_failed', status: 503 }, 'failed'],
+   ['network error', { ok: false, error: 'fetch failed' }, 'failed'],
+   ['timeout', { ok: false, error: 'The operation was aborted due to timeout' }, 'failed'],
+-  ['no device id', { ok: false, error: 'hardware_id_unavailable' }, 'failed'],
++  ['no device id', { ok: false, error: 'hardware_id_unavailable' }, 'no_device_id'],
++  ['unreadable device id', { ok: false, error: 'invalid_hwid' }, 'no_device_id'],
+   ['ok but no token', { ok: true, hasToken: false }, 'failed'],
+   // The trial runs this session (main keeps the token in memory and has
+   // announced it); the start endpoint is idempotent per device, so "failed"
+@@ -65,7 +66,7 @@ test('startTrialWithRetry: a thrown IPC error counts as our error', async () =>
+   assert.equal(calls.n, 2);
+ });
+ 
+-for (const [kind, reply] of [['unavailable', { ok: true, expired: true }], ['rate_limited', { ok: false, error: 'trial_start_rate_limited' }], ['started', { ok: true, hasToken: true }]]) {
++for (const [kind, reply] of [['unavailable', { ok: true, expired: true }], ['rate_limited', { ok: false, error: 'trial_start_rate_limited' }], ['started', { ok: true, hasToken: true }], ['no_device_id', { ok: false, error: 'invalid_hwid' }]]) {
+   test(`startTrialWithRetry: ${kind} is final, no retry`, async () => {
+     const { start, calls } = fakeStart([reply]);
+     const w = waits();
+@@ -76,7 +77,7 @@ for (const [kind, reply] of [['unavailable', { ok: true, expired: true }], ['rat
+ }
+ 
+ test('the copy never shows a code', () => {
+-  assert.deepEqual(Object.keys(TRIAL_START_COPY).sort(), ['failed', 'rate_limited', 'unavailable']);
++  assert.deepEqual(Object.keys(TRIAL_START_COPY).sort(), ['failed', 'no_device_id', 'rate_limited', 'unavailable']);
+   for (const [kind, text] of Object.entries(TRIAL_START_COPY)) {
+     assert.ok(!/_|\bhttp\b|\d{3}/.test(text), `${kind}: ${text}`);
+     assert.ok(text.endsWith('.'), kind);
+diff --git a/src/lib/trial/trialStart.mjs b/src/lib/trial/trialStart.mjs
+index 21871424..3a813df8 100644
+--- a/src/lib/trial/trialStart.mjs
++++ b/src/lib/trial/trialStart.mjs
+@@ -6,11 +6,16 @@
+ 
+ const UNAVAILABLE_CODES = new Set(['trial_ip_limit', 'already_used', 'trial_already_used', 'trial_expired']);
+ const RATE_LIMITED_CODES = new Set(['trial_start_rate_limited']);
++// FORKHUB: the device id could not be read at all (main's trial:start found
++// no stable hardware id, or the server rejected the binding). This is not a
++// network error and retrying will not help — the user must restart the app.
++// (NativelyApiSettings shows the same copy for both codes on its own path.)
++const NO_DEVICE_ID_CODES = new Set(['invalid_hwid', 'hardware_id_unavailable']);
+ 
+ /**
+  * @param {{ ok?: boolean, hasToken?: boolean, persisted?: boolean, expired?: boolean,
+  *           already_used?: boolean, error?: string, status?: number } | null | undefined} res
+- * @returns {'started' | 'unavailable' | 'rate_limited' | 'failed'}
++ * @returns {'started' | 'unavailable' | 'rate_limited' | 'no_device_id' | 'failed'}
+  */
+ export function classifyTrialStart(res) {
+   if (!res || typeof res !== 'object') return 'failed';
+@@ -26,6 +31,7 @@ export function classifyTrialStart(res) {
+   }
+   if (typeof res.error === 'string' && UNAVAILABLE_CODES.has(res.error)) return 'unavailable';
+   if ((typeof res.error === 'string' && RATE_LIMITED_CODES.has(res.error)) || res.status === 429) return 'rate_limited';
++  if (typeof res.error === 'string' && NO_DEVICE_ID_CODES.has(res.error)) return 'no_device_id';
+   return 'failed';
+ }
+ 
+@@ -55,4 +61,5 @@ export const TRIAL_START_COPY = Object.freeze({
+   failed: "Couldn't reach Natively. Check your connection and try again.",
+   rate_limited: 'Too many attempts. Try again later.',
+   unavailable: 'The free trial has already been used on this device.',
++  no_device_id: 'Could not read device ID. Restart the app and try again.',
+ });
 diff --git a/src/types/electron.d.ts b/src/types/electron.d.ts
-index fa075ad..d3fc3da 100644
+index 912b3b6a..d13eacfc 100644
 --- a/src/types/electron.d.ts
 +++ b/src/types/electron.d.ts
-@@ -534,6 +534,7 @@ export interface ElectronAPI {
+@@ -985,6 +985,7 @@ export interface ElectronAPI {
    checkForUpdates: () => Promise<void>
    downloadUpdate: () => Promise<void>
    getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>
