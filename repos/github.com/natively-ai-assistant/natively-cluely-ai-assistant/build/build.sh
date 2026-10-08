@@ -184,5 +184,39 @@ for f in "$DIST"/forkhub/*; do
   mv "$f" "$DIST"/
 done
 rm -rf "$DIST/forkhub" 2>/dev/null || true
+# --- descriptive AppImage name (CONSUME.md promises Natively-*.AppImage) ---
+# Upstream productName is the stealth name `corespeechd`, which
+# electron-builder bakes into the AppImage filename. A per-target
+# artifactName is rejected by electron-builder config schema
+# (TargetConfiguration allows only target+arch), and a linux-wide
+# artifactName would also rename the .deb — which already follows the
+# package `name` (`natively_*_amd64.deb`, as documented) and stays
+# untouched. So rename just the AppImage (+ sidecar blockmap if emitted)
+# and repoint the updater manifest at the new name (hashes/sizes cover
+# file content, so they stay valid).
+for img in "$DIST"/*.AppImage; do
+  [ -e "$img" ] || continue
+  base=$(basename "$img")
+  case "$base" in
+    Natively-*) say "AppImage already descriptive: $base"; continue ;;
+  esac
+  case "$base" in
+    *-*) new="Natively-${base#*-}" ;;
+    *) fail_soft "unexpected AppImage name without version separator: $base" ;;
+  esac
+  say "renaming AppImage $base -> $new"
+  mv "$img" "$DIST/$new" || fail_soft "AppImage rename failed"
+  if [ -e "$img.blockmap" ]; then
+    mv "$img.blockmap" "$DIST/$new.blockmap" || fail_soft "blockmap rename failed"
+  fi
+  if [ -e "$DIST/latest-linux.yml" ]; then
+    sed -i "s/$base/$new/g" "$DIST/latest-linux.yml" \
+      || fail_soft "updater manifest repoint failed"
+  fi
+done
+# The manifest must reference a file that actually shipped.
+for url in $(grep -E '^[[:space:]]*url: ' "$DIST"/latest-linux.yml 2>/dev/null | awk '{print $2}'); do
+  [ -e "$DIST/$url" ] || fail_soft "updater manifest references missing file: $url"
+done
 say "artifacts moved to dist"
 ls "$DIST" | tee -a "$LOG"

@@ -22,8 +22,13 @@ tag note below). Each build carries a ForkHub provenance version
    native module, `ensure-sharp-mac-deps` (no-op on linux), and
    `electron-builder --linux AppImage deb --publish never`.
 6. Moves `*.AppImage`, `*.deb`, `latest-linux.yml`, `*.blockmap` into
-   `$GITHUB_WORKSPACE/dist` and asserts `latest-linux.yml` carries the
-   stamped version — without it in-app updates can never fire.
+   `$GITHUB_WORKSPACE/dist`, renames the AppImage to the descriptive
+   `Natively-<version>-<arch>.AppImage` (upstream `productName` is the
+   stealth name `corespeechd`; the `.deb` already follows the package
+   `name` and is left alone), repoints `latest-linux.yml` at the new
+   name, and asserts the manifest references only shipped files — then
+   asserts `latest-linux.yml` carries the stamped version. Without it
+   in-app updates can never fire.
 7. Never fails the job: on any failure it packs a patched-source tarball,
    logs to `BUILD_LOG.md`, and exits 0. `publish.sh` then skips the updater
    release when no `latest-linux.yml` exists.
@@ -50,10 +55,13 @@ deb, checksums, build log, notes).
 - **Linux only from CI.** macOS needs Developer ID + notarization and
   Windows its own runner — both live outside this catalog. macOS/Windows
   users build the patched source locally (`npm run dist`, DMG/NSIS).
-- **Same product name.** The fork build keeps `productName: "Natively"`
-  (same appId/paths), so installing it cleanly replaces a stock install
-  and inherits its data — the intended migration path. Side-by-side
-  installs are a follow-up (needs appId + protocol + path changes).
+- **Same product name.** The fork build keeps upstream's `productName`
+  (`corespeechd` — the stealth name; same appId/paths), so installing it
+  cleanly replaces a stock install and inherits its data — the intended
+  migration path. Side-by-side installs are a follow-up (needs appId +
+  protocol + path changes). Only the Linux *artifact filename* is made
+  descriptive (`Natively-*.AppImage`, per `CONSUME.md`); the `.deb`
+  already ships as `natively_*_amd64.deb` from the package `name`.
 - **Tag note.** The shared clone step only considers lowercase-`v` tags
   (`refs/tags/v*`), so an upstream `V2.8.8`-style capital-V tag is
   invisible and the build follows the newest lowercase tag (currently

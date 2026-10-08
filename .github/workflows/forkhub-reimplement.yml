@@ -69,7 +69,12 @@ jobs:
             echo "::error::OPENCODE_API_KEY secret is not set. Add it in repo Settings → Secrets."
             exit 1
           fi
-          opencode models "${{ inputs.model }}" | grep -qi "$(printf '%s' "${{ inputs.model }}" | cut -d/ -f2-)" \
+          # NOTE: `opencode models` takes a PROVIDER id, not a model id —
+          # passing the full `provider/model` string always fails with
+          # "Provider not found". Filter by provider, match the model name.
+          PROVIDER="$(printf '%s' "${{ inputs.model }}" | cut -d/ -f1)"
+          MODEL_NAME="$(printf '%s' "${{ inputs.model }}" | cut -d/ -f2-)"
+          opencode models "$PROVIDER" | grep -Fqi "$MODEL_NAME" \
             || { echo "::error::model '${{ inputs.model }}' not visible to this key."; exit 1; }
 
       - name: Re-derive patches
