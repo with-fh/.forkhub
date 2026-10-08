@@ -130,7 +130,14 @@ jobs:
               BASE=$(jq -r --arg id "$ID" '.patches[$id].last_realized_against_commit // empty' "$TDIR/manifest.json")
               AREA=$(sed -n 's/^target_area: *\[\(.*\)\]/\1/p' "$PDIR/INTENT.md" | tr ',' '\n' | tr -d ' []' | grep -v '^$' || true)
               if [ -n "$BASE" ] && [ -n "$AREA" ]; then
-                if git -C "$WORK" fetch --depth 1 origin "$BASE" 2>/dev/null; then
+                # BASE is often already present (e.g. re-run for the same
+                # tag): only fetch when the object is missing, so the
+                # common current case never depends on the server
+                # resolving a raw SHA (shallow clones routinely refuse).
+                if ! git -C "$WORK" cat-file -e "$BASE^{commit}" 2>/dev/null; then
+                  git -C "$WORK" fetch --depth 1 origin "$BASE" 2>/dev/null || true
+                fi
+                if git -C "$WORK" cat-file -e "$BASE^{commit}" 2>/dev/null; then
                   # shellcheck disable=SC2086
                   if [ -z "$(git -C "$WORK" diff --name-only "$BASE" "$TAG" -- $AREA 2>/dev/null)" ]; then
                     echo "$ID: target_area untouched since $BASE — current, skipping agent run"
