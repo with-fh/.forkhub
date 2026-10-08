@@ -57,11 +57,7 @@ jobs:
       - name: Install opencode
         run: |
           set -euo pipefail
-          # NOTE: the `opencode-ai` npm package is the stale v1 line and does
-          # not know newer providers — install the current v2 CLI instead.
-          curl -fsSL https://opencode.ai/install | bash
-          export PATH="${HOME}/.opencode/bin:${PATH}"
-          echo "${HOME}/.opencode/bin" >> "${GITHUB_PATH}"
+          npm install -g opencode-ai
           opencode --version
 
       - name: Probe model auth (fail fast on config errors)
