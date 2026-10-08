@@ -212,9 +212,10 @@ jobs:
               echo "needs-human-decision issue already open for $patch_id; not dispatching"
               return 0
             fi
-            echo "dispatching forkhub reimplement for $patch_id @ $UP ($phase failure)"
+            echo "dispatching forkhub reimplement for $patch_id @ $UPSTREAM_TAG ($phase failure)"
             gh workflow run "forkhub reimplement" --repo "$GITHUB_REPOSITORY" \
-              -f target="${{ matrix.pair.target }}" -f patch="$patch_id" -f tag="$UPSTREAM_TAG" || true
+              -f target="${{ matrix.pair.target }}" -f patch="$patch_id" -f tag="$UPSTREAM_TAG" \
+              || echo "::warning::reimplement dispatch failed for $patch_id"
           }
 
           set -euo pipefail
