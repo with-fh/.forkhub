@@ -1,5 +1,5 @@
 diff --git a/electron/main.ts b/electron/main.ts
-index 5f79dd8..a822d1a 100644
+index 67c15a8..6c17177 100644
 --- a/electron/main.ts
 +++ b/electron/main.ts
 @@ -1451,6 +1451,14 @@ export class AppState {
@@ -17,7 +17,7 @@ index 5f79dd8..a822d1a 100644
    private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'none'
  
    // View management
-@@ -2982,6 +2990,8 @@ export class AppState {
+@@ -2991,6 +2999,8 @@ export class AppState {
      })
  
      autoUpdater.on("update-available", async (info) => {
@@ -26,7 +26,7 @@ index 5f79dd8..a822d1a 100644
        // PHASE-2A: refuse non-upgrades (downgrade, equal, malformed). electron-updater
        // normally already filters this, but we belt-and-brace it: a stale latest.yml on
        // GitHub (or a republish with the wrong tag) must NEVER cause us to invite the
-@@ -3023,6 +3033,8 @@ export class AppState {
+@@ -3032,6 +3042,8 @@ export class AppState {
      })
  
      autoUpdater.on("update-not-available", (info) => {
@@ -35,7 +35,7 @@ index 5f79dd8..a822d1a 100644
        console.log("[AutoUpdater] Update not available:", info.version)
        this.updateAvailable = false
        this.updateDownloadState = 'idle'
-@@ -3034,6 +3046,19 @@ export class AppState {
+@@ -3043,6 +3055,19 @@ export class AppState {
        console.error("[AutoUpdater] Error:", err)
        this.updateDownloadState = this.updateAvailable ? 'available' : 'idle'
        this.updateDownloadPromise = null
@@ -55,7 +55,7 @@ index 5f79dd8..a822d1a 100644
        // Include more details in the error message for debugging
        const errorMessage = err.message || err.toString() || 'Unknown update error'
        this.broadcast("update-error", errorMessage)
-@@ -3113,6 +3138,7 @@ export class AppState {
+@@ -3122,6 +3147,7 @@ export class AppState {
            };
  
            // Notify renderer
@@ -63,7 +63,7 @@ index 5f79dd8..a822d1a 100644
            this.broadcast("update-available", {
              ...info,
              parsedNotes: notes
-@@ -3122,11 +3148,19 @@ export class AppState {
+@@ -3131,11 +3157,19 @@ export class AppState {
            this.updateAvailable = false;
            this.updateDownloadState = 'idle';
            this.downloadedUpdateInfo = null;
@@ -83,7 +83,7 @@ index 5f79dd8..a822d1a 100644
      }
    }
  
-@@ -3329,6 +3363,10 @@ export class AppState {
+@@ -3338,6 +3372,10 @@ export class AppState {
  
    public async checkForUpdates(): Promise<void> {
      console.log('[AutoUpdater] Manual check for updates requested')
@@ -94,7 +94,7 @@ index 5f79dd8..a822d1a 100644
      try {
        // Use app.isPackaged, not NODE_ENV, matching every other updater gate in
        // this file (see canAutoInstall()) — a stray NODE_ENV=development in a
-@@ -3340,9 +3378,18 @@ export class AppState {
+@@ -3349,9 +3387,18 @@ export class AppState {
          await autoUpdater.checkForUpdatesAndNotify()
        }
      } catch (err: any) {
@@ -117,7 +117,7 @@ index 5f79dd8..a822d1a 100644
    }
  
 diff --git a/electron/services/CalendarManager.ts b/electron/services/CalendarManager.ts
-index 507f78a..4272275 100644
+index 507f78a..57e192f 100644
 --- a/electron/services/CalendarManager.ts
 +++ b/electron/services/CalendarManager.ts
 @@ -37,6 +37,81 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
@@ -202,16 +202,48 @@ index 507f78a..4272275 100644
  const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
  const TOKEN_URL = 'https://oauth2.googleapis.com/token';
  const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
-@@ -66,10 +141,15 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
+@@ -66,13 +141,62 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
  /** Token-endpoint errors that mean the stored grant is dead and reconnecting is the only fix. */
  const DEAD_GRANT_ERRORS = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client', 'deleted_client']);
  
 -function calendarOAuthClient(): { id: string; secret: string } {
++/** Stable code for "the build cannot do calendar OAuth": no usable client id or secret. */
++export const CALENDAR_NOT_CONFIGURED = 'calendar_not_configured';
++
++/** Friendly copy for the above — shown on the callback page and under the connect button. */
++export const CALENDAR_NOT_CONFIGURED_COPY =
++    'Calendar isn\u2019t set up for this build yet (Google OAuth isn\u2019t configured).';
++
++/** Fork client secret resolution (mirrors readForkGoogleClientId, secret flavor). */
++function readForkGoogleClientSecret(): string | null {
++    try {
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const { app } = require('electron') as typeof import('electron');
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const pathMod = require('path') as typeof import('path');
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const fsMod = require('fs') as typeof import('fs');
++        const pkg = JSON.parse(fsMod.readFileSync(pathMod.join(app.getAppPath(), 'package.json'), 'utf8'));
++        const secret = pkg?.nativelyGoogleClientSecret;
++        return typeof secret === 'string' && secret.trim() ? secret.trim() : null;
++    } catch {
++        return null;
++    }
++}
++
 +function calendarOAuthClient(): { id: string; secret: string; direct: boolean } {
 +    const { clientId, direct } = resolveCalendarClient();
-+    // Fork-owned public clients carry no secret, ever — stock keeps its
-+    // baked/env secret exactly as before.
-+    if (direct) return { id: clientId, secret: '', direct };
++    // Fork-owned client: Google requires the client secret at the token
++    // endpoint even for Desktop clients using PKCE (absent → 400
++    // `invalid_request: client_secret is missing.`). The secret ships baked
++    // into the packaged app (never committed to source) or via env for dev;
++    // stock keeps its baked/env secret exactly as before.
++    if (direct) {
++        const secret =
++            readForkGoogleClientSecret() ||
++            (process.env.NATIVELY_GOOGLE_CLIENT_SECRET || '').trim();
++        return { id: clientId, secret, direct };
++    }
      return {
 -        id: process.env.GOOGLE_CALENDAR_CLIENT_ID || DEFAULT_CALENDAR_CLIENT_ID,
 +        id: process.env.GOOGLE_CALENDAR_CLIENT_ID || clientId,
@@ -220,48 +252,89 @@ index 507f78a..4272275 100644
      };
  }
  
-@@ -235,7 +315,7 @@ export class CalendarManager extends EventEmitter {
++/** True when an error means calendar OAuth can never succeed on this build. */
++export function isCalendarNotConfigured(error: unknown): boolean {
++    const code = (error as any)?.code;
++    if (code === CALENDAR_NOT_CONFIGURED) return true;
++    const msg = String((error as any)?.message || error || '');
++    return (
++        msg.includes(CALENDAR_NOT_CONFIGURED) ||
++        msg.includes('client_secret is missing') ||
++        /calendar[^.]{0,80}not configured/i.test(msg)
++    );
++}
++
+ function base64Url(buf: Buffer): string {
+     return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+ }
+@@ -235,7 +359,16 @@ export class CalendarManager extends EventEmitter {
          // page that says "OAuth client not found", the user never hits the
          // callback, and the loopback server below leaks.
          if (!client.id) {
 -            throw new Error('Calendar sync is not configured in this build (no Google OAuth client ID).');
 +            throw new Error('Calendar sync is not configured in this build (missing Google client ID).');
++        }
++        // Fail fast when the fork client has no secret: Google rejects the
++        // code exchange with 400 `client_secret is missing.` even for
++        // Desktop clients, so opening the browser first would only waste a
++        // consent round-trip to land on an error page.
++        if (client.direct && !client.secret) {
++            const err = new Error(CALENDAR_NOT_CONFIGURED_COPY) as any;
++            err.code = CALENDAR_NOT_CONFIGURED;
++            throw err;
          }
  
          // PKCE: only this process knows the verifier, so a code intercepted on
-@@ -361,7 +441,18 @@ export class CalendarManager extends EventEmitter {
+@@ -286,7 +419,13 @@ export class CalendarManager extends EventEmitter {
+                     respond({ kind: 'connected' });
+                     finish(() => resolve());
+                 } catch (err) {
+-                    respond({ kind: 'error', reason: 'Google didn’t accept the sign-in code. It may have expired.' });
++                    // Name the configuration problem honestly: a missing or
++                    // rejected client secret is a build/packaging issue, not
++                    // an expired code. Everything else keeps the retry copy.
++                    const reason = isCalendarNotConfigured(err)
++                        ? CALENDAR_NOT_CONFIGURED_COPY
++                        : 'Google didn’t accept the sign-in code. It may have expired.';
++                    respond({ kind: 'error', reason });
+                     finish(() => reject(err));
+                 }
+             });
+@@ -361,7 +500,20 @@ export class CalendarManager extends EventEmitter {
      private async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string) {
          const client = calendarOAuthClient();
          try {
 -            const data = await postTokenEndpoint({
-+            // Fork-owned public client: exchange straight with Google via the
-+            // pure PKCE helpers — no secret exists for a foreign client id.
-+            // Stock path below untouched.
++            // Fork-owned client: exchange straight with Google via the
++            // pure PKCE helpers, sending the baked fork secret (Google
++            // requires it even for Desktop clients). Stock path below
++            // untouched.
 +            const data = client.direct
 +                // eslint-disable-next-line @typescript-eslint/no-var-requires
 +                ? await require('./calendarPkce').exchangeCodeDirect(
 +                    code,
 +                    codeVerifier,
 +                    client.id,
-+                    redirectUri
++                    redirectUri,
++                    client.secret || undefined
 +                )
 +                : await postTokenEndpoint({
                  grant_type: 'authorization_code',
                  code,
                  code_verifier: codeVerifier,
-@@ -440,6 +531,28 @@ export class CalendarManager extends EventEmitter {
+@@ -440,6 +592,28 @@ export class CalendarManager extends EventEmitter {
          }
  
          const client = calendarOAuthClient();
-+        // Fork-owned public client: refresh straight with Google via the
-+        // pure PKCE helpers (no secret). Resolved fresh each time so
-+        // packaged-vs-dev configuration cannot go stale across restarts.
-+        // Stock path below untouched.
++        // Fork-owned client: refresh straight with Google via the pure
++        // PKCE helpers, sending the baked fork secret like the exchange.
++        // Resolved fresh each time so packaged-vs-dev configuration cannot
++        // go stale across restarts. Stock path below untouched.
 +        if (client.direct && client.id) {
 +            try {
 +                // eslint-disable-next-line @typescript-eslint/no-var-requires
 +                const { refreshTokenDirect } = require('./calendarPkce');
-+                const data = await refreshTokenDirect(this.refreshToken, client.id);
++                const data = await refreshTokenDirect(this.refreshToken, client.id, client.secret || undefined);
 +                this.handleTokenResponse(data);
 +            } catch (error: any) {
 +                console.error('[CalendarManager] Token refresh failed:', error);
@@ -280,10 +353,10 @@ index 507f78a..4272275 100644
                  grant_type: 'refresh_token',
 diff --git a/electron/services/__tests__/CalendarPkce.test.mjs b/electron/services/__tests__/CalendarPkce.test.mjs
 new file mode 100644
-index 0000000..14b4abb
+index 0000000..d64fdae
 --- /dev/null
 +++ b/electron/services/__tests__/CalendarPkce.test.mjs
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,77 @@
 +// electron/services/__tests__/CalendarPkce.test.mjs
 +//
 +// Unit tests for the fork's direct Google OAuth PKCE helpers
@@ -297,7 +370,7 @@ index 0000000..14b4abb
 +import { fileURLToPath, pathToFileURL } from 'node:url';
 +
 +const __dirname = path.dirname(fileURLToPath(import.meta.url));
-+const { createPkcePair } = await import(
++const { createPkcePair, exchangeCodeDirect, refreshTokenDirect } = await import(
 +  pathToFileURL(path.resolve(__dirname, '../../../dist-electron/electron/services/calendarPkce.js')).href
 +);
 +
@@ -326,12 +399,47 @@ index 0000000..14b4abb
 +  assert.notEqual(a.verifier, b.verifier);
 +  assert.notEqual(a.challenge, b.challenge);
 +});
++
++test('exchangeCodeDirect sends client_secret only when configured', async () => {
++  let seen = '';
++  globalThis.fetch = async (_url, opts) => {
++    seen = String(opts.body);
++    return { ok: true, json: async () => ({}) };
++  };
++  try {
++    await exchangeCodeDirect('code', 'verifier', 'cid', 'http://127.0.0.1:1', 'shh-secret');
++    assert.match(seen, /client_secret=shh-secret/);
++    assert.match(seen, /code_verifier=verifier/);
++    await exchangeCodeDirect('code', 'verifier', 'cid', 'http://127.0.0.1:1');
++    assert.doesNotMatch(seen, /client_secret/);
++  } finally {
++    // @ts-ignore restore: no fetch stub outside this test
++    delete globalThis.fetch;
++  }
++});
++
++test('refreshTokenDirect sends client_secret only when configured', async () => {
++  let seen = '';
++  globalThis.fetch = async (_url, opts) => {
++    seen = String(opts.body);
++    return { ok: true, json: async () => ({}) };
++  };
++  try {
++    await refreshTokenDirect('rt', 'cid', 'shh-secret');
++    assert.match(seen, /client_secret=shh-secret/);
++    await refreshTokenDirect('rt', 'cid');
++    assert.doesNotMatch(seen, /client_secret/);
++  } finally {
++    // @ts-ignore restore: no fetch stub outside this test
++    delete globalThis.fetch;
++  }
++});
 diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
 new file mode 100644
-index 0000000..b22080f
+index 0000000..75e7369
 --- /dev/null
 +++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,101 @@
 +// electron/services/__tests__/ForkPatch2Sources.test.mjs
 +//
 +// Source assertions for the second ForkHub patch (calendar direct auth,
@@ -378,6 +486,15 @@ index 0000000..b22080f
 +  assert.match(src, /apps\.googleusercontent\.com/);
 +  assert.match(src, /isForkCatalogBuild/);
 +  assert.match(src, /UPSTREAM_OWNER/);
++  // Google requires client_secret even for Desktop clients: the fork
++  // secret ships baked (never committed) or via env, and is sent on the
++  // direct path; without it connect fails fast with a named error.
++  assert.match(src, /readForkGoogleClientSecret/);
++  assert.match(src, /nativelyGoogleClientSecret/);
++  assert.match(src, /NATIVELY_GOOGLE_CLIENT_SECRET/);
++  assert.match(src, /CALENDAR_NOT_CONFIGURED/);
++  assert.match(src, /isCalendarNotConfigured/);
++  assert.match(src, /set up for this build/);
 +});
 +
 +test('calendar: PKCE helpers stay pure (no electron import)', () => {
@@ -385,8 +502,11 @@ index 0000000..b22080f
 +  assert.doesNotMatch(src, /from ['"]electron['"]/);
 +  assert.match(src, /createPkcePair/);
 +  assert.match(src, /oauth2\.googleapis\.com\/token/);
-+  // Public client: no secret is ever SENT (docblock mentions are fine).
-+  assert.doesNotMatch(src, /client_secret\s*:/i);
++  // Secret is conditional, never unconditional: the key appears only in
++  // the provided-secret spread (Google requires it even for Desktop
++  // clients; absent configuration sends none).
++  assert.match(src, /clientSecret/);
++  assert.match(src, /client_secret: clientSecret/);
 +});
 +
 +test('version check: updater failures fall back to the catalog compare', () => {
@@ -400,6 +520,10 @@ index 0000000..b22080f
 +  assert.match(src, /Include more details in the error message for debugging/);
 +  // Manual compare always reaches a terminal state (never stuck Checking).
 +  assert.match(src, /Could not reach the update feed/);
++  // ForkHub channel: every catalog tag is fh-channeled, so the updater
++  // must follow the fh channel (whose fh-linux.yml build.sh publishes) —
++  // channel='latest' matches nothing (ERR_UPDATER_NO_PUBLISHED_VERSIONS).
++  assert.match(src, /autoUpdater\.channel = 'fh'/);
 +});
 +
 +test('about: support opens original + fork sponsors, maintainer card present', () => {
@@ -419,10 +543,10 @@ index 0000000..b22080f
 +});
 diff --git a/electron/services/calendarPkce.ts b/electron/services/calendarPkce.ts
 new file mode 100644
-index 0000000..6ac5ccd
+index 0000000..99df124
 --- /dev/null
 +++ b/electron/services/calendarPkce.ts
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,118 @@
 +/**
 + * electron/services/calendarPkce.ts
 + *
@@ -432,9 +556,14 @@ index 0000000..6ac5ccd
 + * WHY: the stock flow exchanges the auth code through the natively-api
 + * proxy, which holds the secret for UPSTREAM's OAuth client. A fork build
 + * can never use that proxy with its own client id (Google binds the code
-+ * to the initiating client). Desktop OAuth clients are public clients, so
-+ * with PKCE (RFC 7636) the app exchanges and refreshes tokens DIRECTLY
-+ * with Google — no secret, no proxy. See CalendarManager for the wiring.
++ * to the initiating client). The fork therefore exchanges and refreshes
++ * tokens DIRECTLY with Google — sending the fork OAuth client's own
++ * secret, which Google requires at the token endpoint even for Desktop
++ * clients with PKCE (without it Google answers 400 `invalid_request:
++ * client_secret is missing.`). Per Google's own native-app docs the
++ * secret is not treated as confidential here: it ships baked into the
++ * packaged app (see CalendarManager secret resolution + build.sh), never
++ * committed to source. See CalendarManager for the wiring.
 + */
 +
 +import * as crypto from "crypto";
@@ -483,19 +612,25 @@ index 0000000..6ac5ccd
 +      `google_token_failed status=${response.status}${detail ? ` ${detail}` : ""}`.trim()
 +    );
 +    // Carry Google's machine-readable code so callers can apply the same
-+    // dead-grant rule as the stock refresh path (no client_secret involved).
++    // dead-grant rule as the stock refresh path.
 +    (err as any).code = (errBody as any)?.error || "token_request_failed";
 +    throw err;
 +  }
 +  return response.json();
 +}
 +
-+/** Direct code→token exchange (public client: no client_secret). */
++/**
++ * Direct code→token exchange. `clientSecret` is sent when provided: Google
++ * requires it at the token endpoint even for Desktop clients using PKCE
++ * (absent → 400 `invalid_request: client_secret is missing.`). Omitted
++ * only when the caller has no secret to send.
++ */
 +export function exchangeCodeDirect(
 +  code: string,
 +  verifier: string,
 +  clientId: string,
 +  redirectUri: string,
++  clientSecret?: string,
 +  signal?: AbortSignal
 +): Promise<any> {
 +  return postTokenRequest(
@@ -505,15 +640,19 @@ index 0000000..6ac5ccd
 +      redirect_uri: redirectUri,
 +      grant_type: "authorization_code",
 +      code_verifier: verifier,
++      ...(clientSecret ? { client_secret: clientSecret } : {}),
 +    },
 +    signal
 +  );
 +}
 +
-+/** Direct refresh-token grant (public client: no client_secret). */
++/**
++ * Direct refresh-token grant. Same secret rule as the exchange above.
++ */
 +export function refreshTokenDirect(
 +  refreshToken: string,
 +  clientId: string,
++  clientSecret?: string,
 +  signal?: AbortSignal
 +): Promise<any> {
 +  return postTokenRequest(
@@ -521,6 +660,7 @@ index 0000000..6ac5ccd
 +      refresh_token: refreshToken,
 +      client_id: clientId,
 +      grant_type: "refresh_token",
++      ...(clientSecret ? { client_secret: clientSecret } : {}),
 +    },
 +    signal
 +  );

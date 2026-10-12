@@ -127,16 +127,34 @@ npm pkg set "version=$FH_VERSION" >>"$LOG" 2>&1 || fail_soft "version stamp fail
 
 # --- bake the fork's Google OAuth client id (calendar direct PKCE flow) ---
 # NATIVELY_GOOGLE_CLIENT_ID is a PUBLIC identifier (ships in every build that
-# has it), not a secret — the direct flow needs no secret. Absent: calendar
-# connect reports it is unconfigured instead of failing silently. (CI can only
-# see this var if the shared workflow forwards it; local fork releases set it
-# directly. See build/BUILD.md.)
+# has it). Absent: the FORK_DEFAULT_CLIENT_ID fallback in CalendarManager
+# still applies to catalog builds. (CI can only see this var if the shared
+# workflow forwards it; local fork releases set it directly. See
+# build/BUILD.md.)
 if [ -n "${NATIVELY_GOOGLE_CLIENT_ID:-}" ]; then
   say "baking fork Google client id"
   npm pkg set "build.extraMetadata.nativelyGoogleClientId=$NATIVELY_GOOGLE_CLIENT_ID" >>"$LOG" 2>&1 \
     || fail_soft "client id stamp failed"
 else
-  say "no NATIVELY_GOOGLE_CLIENT_ID — calendar ships unconfigured (clear error at connect time)"
+  say "no NATIVELY_GOOGLE_CLIENT_ID — packaged builds fall back to the fork default client id"
+fi
+
+# --- bake the fork's Google OAuth client secret (calendar direct flow) ---
+# Google requires client_secret at the token endpoint even for Desktop
+# clients using PKCE (absent → 400 `invalid_request: client_secret is
+# missing.`), and per Google's own native-app docs the secret is NOT
+# treated as confidential here — but it is still never logged and never
+# committed: it arrives only via env (CI secret or local shell) and is
+# baked into the packaged app. Absent: calendar connect fails fast with a
+# clear not-configured error instead of wasting a consent round-trip.
+# (CI can only see this var if the shared workflow forwards it; the repo
+# secret itself is added in GitHub Settings. See build/BUILD.md.)
+if [ -n "${NATIVELY_GOOGLE_CLIENT_SECRET:-}" ]; then
+  say "baking fork Google client secret (value never logged)"
+  npm pkg set "build.extraMetadata.nativelyGoogleClientSecret=$NATIVELY_GOOGLE_CLIENT_SECRET" >>"$LOG" 2>&1 \
+    || fail_soft "client secret stamp failed"
+else
+  say "no NATIVELY_GOOGLE_CLIENT_SECRET — calendar direct flow will report not-configured at connect time"
 fi
 
 # --- deb maintainer (electron-builder requires an author email for the
@@ -167,18 +185,28 @@ say "electron-builder (linux AppImage + deb)"
   || fail_soft "electron-builder failed (see BUILD_LOG.md)"
 
 # --- collect updater-relevant artifacts ---
+# ForkHub updater channel file: the app follows the `fh` update channel
+# (see setupAutoUpdater), which electron-updater resolves as `fh-linux.yml`
+# — the stock `latest-linux.yml` name is never requested on this feed.
+# Same content, second name (electron-builder only emits the stock name).
+if [ -e release/latest-linux.yml ]; then
+  cp release/latest-linux.yml release/fh-linux.yml || fail_soft "fh-linux.yml copy failed"
+  say "fh-linux.yml emitted"
+fi
 mkdir -p "$DIST/forkhub"
 MOVED=0
-for f in release/*.AppImage release/*.deb release/latest-linux.yml release/*.blockmap; do
+for f in release/*.AppImage release/*.deb release/latest-linux.yml release/fh-linux.yml release/*.blockmap; do
   [ -e "$f" ] || continue
   mv "$f" "$DIST/forkhub"/
   MOVED=$((MOVED + 1))
 done
 [ "$MOVED" -gt 0 ] || fail_soft "electron-builder produced no artifacts in release/"
-# The updater feed resolves `latest-linux.yml` on linux: it must exist and
+# The updater feed resolves the manifests on linux: both must exist and
 # must carry the stamped ForkHub version, or in-app updates can never fire.
-grep -q "version: $FH_VERSION" "$DIST"/forkhub/latest-linux.yml 2>/dev/null \
-  || fail_soft "latest-linux.yml missing or version mismatch (expected $FH_VERSION)"
+for yml in latest-linux.yml fh-linux.yml; do
+  grep -q "version: $FH_VERSION" "$DIST/forkhub/$yml" 2>/dev/null \
+    || fail_soft "$yml missing or version mismatch (expected $FH_VERSION)"
+done
 for f in "$DIST"/forkhub/*; do
   [ -e "$f" ] || continue
   mv "$f" "$DIST"/
@@ -209,14 +237,19 @@ for img in "$DIST"/*.AppImage; do
   if [ -e "$img.blockmap" ]; then
     mv "$img.blockmap" "$DIST/$new.blockmap" || fail_soft "blockmap rename failed"
   fi
-  if [ -e "$DIST/latest-linux.yml" ]; then
-    sed -i "s/$base/$new/g" "$DIST/latest-linux.yml" \
-      || fail_soft "updater manifest repoint failed"
-  fi
+  for yml in "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml; do
+    if [ -e "$yml" ]; then
+      sed -i "s/$base/$new/g" "$yml" \
+        || fail_soft "updater manifest repoint failed ($yml)"
+    fi
+  done
 done
-# The manifest must reference a file that actually shipped.
-for url in $(grep -E '^[[:space:]]*url: ' "$DIST"/latest-linux.yml 2>/dev/null | awk '{print $2}'); do
-  [ -e "$DIST/$url" ] || fail_soft "updater manifest references missing file: $url"
+# The manifests must reference files that actually shipped.
+for yml in "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml; do
+  [ -e "$yml" ] || continue
+  for url in $(grep -E '^[[:space:]]*url: ' "$yml" 2>/dev/null | awk '{print $2}'); do
+    [ -e "$DIST/$url" ] || fail_soft "updater manifest references missing file: $url ($yml)"
+  done
 done
 say "artifacts moved to dist"
 ls "$DIST" | tee -a "$LOG"

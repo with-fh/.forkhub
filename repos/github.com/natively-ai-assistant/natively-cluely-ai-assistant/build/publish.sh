@@ -35,7 +35,7 @@ if [ -z "$(ls "$DIST"/latest-linux.yml 2>/dev/null)" ]; then
 fi
 
 FILES=""
-for f in "$DIST"/*.AppImage "$DIST"/latest-linux.yml "$DIST"/*.blockmap; do
+for f in "$DIST"/*.AppImage "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml "$DIST"/*.blockmap; do
   [ -e "$f" ] || continue
   FILES="$FILES $f"
 done

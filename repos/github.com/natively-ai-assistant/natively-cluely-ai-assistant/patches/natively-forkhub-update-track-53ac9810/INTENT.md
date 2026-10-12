@@ -2,10 +2,10 @@
 id: natively-forkhub-update-track-53ac9810
 title: Natively ForkHub update track (ForkHub catalog feed) + stable hardware ID without premium submodule
 target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
-target_area: [electron/update/updateFeed.ts, electron/update/ReleaseNotesManager.ts, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, src/components/UpdateBanner.tsx, src/components/onboarding/OrchestratedToasterHost.tsx, src/types/electron.d.ts, package.json]
+target_area: [electron/update/updateFeed.ts, electron/update/ReleaseNotesManager.ts, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, src/components/UpdateBanner.tsx, src/components/onboarding/OrchestratedToasterHost.tsx, src/types/electron.d.ts, package.json, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs]
 status: draft
 applied_upstream_pr: none
-version: 6
+version: 7
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -55,7 +55,11 @@ placeholder.
    and stock builds never see fork builds. Fork app versions carry a
    `-fh.<owner>.<n>` suffix; the updater runs with `allowPrerelease = true`
    on this feed (the feed contains ONLY fork builds, so no stock
-   prerelease can leak in).
+   prerelease can leak in) and follows the **`fh` update channel**:
+   every catalog tag is `fh`-channeled, so `channel='latest'` matches
+   nothing (every check ends in `ERR_UPDATER_NO_PUBLISHED_VERSIONS`);
+   the `fh-linux.yml` manifest for that channel ships beside
+   `latest-linux.yml`.
 3. **Fork rebuilds must pass the upgrade gate.** Upstream's `isRealUpgrade`
    strips `-.*` suffixes, so `2.8.1-fh.imbios.1` → `2.8.1-fh.imbios.2`
    compares equal and would be refused as a "non-upgrade" (same for the
@@ -121,7 +125,8 @@ placeholder.
   `isForkCounterUpgrade()` (same-owner rebuild ordering), URL builders;
   `apiReleaseUrl('latest')` throws by design.
 - `electron/main.ts` `setupAutoUpdater()`: `setFeedURL({provider:'github',
-  owner, repo})`, `channel='latest'`, `allowPrerelease=true`;
+  owner, repo})`, **`channel='fh'`** (custom-channel matching on the
+  shared catalog; see non-negotiable 2), `allowPrerelease=true`;
   `checkForUpdatesManual()` extracts the version from catalog tags before
   comparing; `isRealUpgrade()` / `isVersionNewer()` fall through to the
   fork-counter tiebreak on numeric ties.

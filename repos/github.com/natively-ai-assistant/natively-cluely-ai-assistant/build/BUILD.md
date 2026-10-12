@@ -21,9 +21,11 @@ tag note below). Each build carries a ForkHub provenance version
    `app:build` (Linux subset): vite build, electron typecheck + bundle,
    native module, `ensure-sharp-mac-deps` (no-op on linux), and
    `electron-builder --linux AppImage deb --publish never`.
-6. Moves `*.AppImage`, `*.deb`, `latest-linux.yml`, `*.blockmap` into
-   `$GITHUB_WORKSPACE/dist`, renames the AppImage to the descriptive
-   `Natively-<version>-<arch>.AppImage` (upstream `productName` is the
+6. Moves `*.AppImage`, `*.deb`, `latest-linux.yml`, `fh-linux.yml`,
+   `*.blockmap` into `$GITHUB_WORKSPACE/dist` (`fh-linux.yml` is a copy
+   of the builder's `latest-linux.yml`: the app follows the `fh` update
+   channel, which electron-updater resolves as `fh-linux.yml`), renames
+   the AppImage to the descriptive `Natively-<version>-<arch>.AppImage` (upstream `productName` is the
    stealth name `corespeechd`; the `.deb` already follows the package
    `name` and is left alone), repoints `latest-linux.yml` at the new
    name, and asserts the manifest references only shipped files — then
@@ -78,13 +80,21 @@ deb, checksums, build log, notes).
   apply later (stealth modes intentionally break association).
 - **Google calendar client (one-time maintainer setup).** Connect calendar
   uses the direct PKCE flow with the fork's own OAuth client: create a
-  Google Cloud "Desktop app" OAuth client with redirect URI
-  `http://localhost:11111/auth/callback`, then build with
+  Google Cloud OAuth client (Desktop type works; any type works once the
+  secret is sent — Google requires `client_secret` at the token endpoint
+  even for Desktop clients, so secretless exchange always fails with
+  `invalid_request: client_secret is missing.`), then build with
   `NATIVELY_GOOGLE_CLIENT_ID=<id>` (baked into `build.extraMetadata` by
-  `build.sh`; the id is public, not a secret). Without it, connect
-  reports unconfigured instead of failing silently. CI forwarding of that
-  var through the shared workflow is a follow-up; local fork releases set
-  it directly.
+  `build.sh`; the id is public, not a secret) AND
+  `NATIVELY_GOOGLE_CLIENT_SECRET=<secret>` (baked the same way, never
+  logged, never committed — per Google's native-app docs the secret is
+  not treated as confidential, but it still only travels via env).
+  Without a secret, connect reports not-configured instead of failing
+  at Google. CI forwards both vars (see the shared workflow build step)
+  from repo secrets — add `NATIVELY_GOOGLE_CLIENT_SECRET` in GitHub
+  Settings → Secrets; local fork releases set both directly. Redirect:
+  the app uses a loopback callback on a dynamic port (`http://127.0.0.1`),
+  which Desktop clients accept.
 - **Known drift risk.** `reference.diff` is verified against the upstream
   tag at capture time (currently `v2.8.1`). When upstream drifts, the
   apply step fails loudly — re-derive via `fh` (`drift-check` →

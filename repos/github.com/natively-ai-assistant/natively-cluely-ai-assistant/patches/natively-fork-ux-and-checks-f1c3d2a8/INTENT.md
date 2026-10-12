@@ -5,7 +5,7 @@ target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
 target_area: [electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/main.ts, src/components/AboutSection.tsx, src/components/ui/ConnectCalendarButton.tsx, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs]
 status: draft
 applied_upstream_pr: none
-version: 3
+version: 4
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -54,9 +54,15 @@ feed/HWID patch independently re-derivable.
    as a rejected promise AND an async `error` event — the
    `manualCheckFallbackPending` flag guarantees one fallback run, and
    download-time errors (flag clear) still broadcast as before.
-3. **No secret in the fork.** The direct flow sends no `client_secret`
-   anywhere (asserted in tests); the baked client id is a public
-   identifier, like any shipped OAuth client id.
+3. **Secret ships baked, never committed.** Google requires
+   `client_secret` at the token endpoint even for Desktop clients using
+   PKCE (absent → 400 `invalid_request: client_secret is missing.`), so
+   the direct flow sends the fork OAuth client's secret — which arrives
+   only via `build.extraMetadata` (stamped from `NATIVELY_GOOGLE_CLIENT_SECRET`
+   at package time) or env for dev, is never logged, and never appears in
+   source. The baked client id stays a public identifier. Without a
+   secret, connect fails fast with a named not-configured error instead
+   of wasting a consent round-trip.
 4. **No silent UI dead-ends.** Calendar connect failures render under the
    button; manual compare with no reachable feed broadcasts instead of
    leaving Checking stuck.
@@ -74,12 +80,15 @@ feed/HWID patch independently re-derivable.
   exchange/refresh branches; proxy + event fetching untouched.
 - Release `build.sh` bakes `build.extraMetadata.nativelyGoogleClientId`
   from `NATIVELY_GOOGLE_CLIENT_ID` when set (no shared-workflow change
-  needed for local fork releases; CI forwarding is a follow-up).
+  needed for local fork releases; CI forwarding is a follow-up) and
+  `build.extraMetadata.nativelyGoogleClientSecret` from
+  `NATIVELY_GOOGLE_CLIENT_SECRET` when set (value never logged).
 - Zero-config default: fork catalog builds fall back to the maintainer's
   public Desktop client id (gated on the packaged publish owner, so stock
   checkouts keep the placeholder guard); explicit baked/env configuration
-  always wins. v2 addition — the client id is public by design (PKCE uses
-  no secret).
+  always wins. v2 addition — the client id is public by design. v4
+  addition — the client SECRET must also be baked (Google demands it even
+  for Desktop clients); without it connect reports not-configured.
 - One-time maintainer setup (Google Cloud → Desktop OAuth client with
   `http://localhost:11111/auth/callback`) documented in `build/BUILD.md`.
 - `main.ts`: `manualCheckFallbackPending` flag; updater-reject and
