@@ -1,7 +1,16 @@
 diff --git a/electron/main.ts b/electron/main.ts
-index 67c15a8..6c17177 100644
+index 67c15a8..8e24192 100644
 --- a/electron/main.ts
 +++ b/electron/main.ts
+@@ -26,7 +26,7 @@ import { installResilientDnsLookup } from "./utils/resilientDnsLookup"
+ import { resolveDebugLogPath } from "./utils/debugLogPath.mjs"
+ import { MeetingLifecycleQueue, type MeetingLifecycleState } from "./audio/meetingLifecycleQueue"
+ import { autoUpdater } from "electron-updater"
+-import { extractVersionFromTag, getUpdateFeed, isForkCounterUpgrade } from "./update/updateFeed"
++import { extractVersionFromTag, getUpdateFeed, isBundleCounterUpgrade, isForkCounterUpgrade, readBakedBundleN } from "./update/updateFeed"
+ import { summarizeUpdateDownload } from "./update/updateDownloadSummary"
+ 
+ import {
 @@ -1451,6 +1451,14 @@ export class AppState {
    // Last `total` from download-progress; smaller than the file when the download was differential.
    private lastUpdateProgressTotal: number | null = null
@@ -55,7 +64,30 @@ index 67c15a8..6c17177 100644
        // Include more details in the error message for debugging
        const errorMessage = err.message || err.toString() || 'Unknown update error'
        this.broadcast("update-error", errorMessage)
-@@ -3122,6 +3147,7 @@ export class AppState {
+@@ -3105,7 +3130,21 @@ export class AppState {
+ 
+         console.log(`[AutoUpdater] Manual Check: Current=${currentVersion}, Latest=${latestVersion}`);
+ 
+-        if (this.isVersionNewer(currentVersion, latestVersion)) {
++        // Bundle-counter rule first: the catalog compare resolves bundle
++        // tags (`<slug>--v<base>-fh<N>`), whose counters the version gates
++        // below cannot order (same base strips equal, and the no-cross-talk
++        // guard refuses `-fh<N>` vs `-fh.<owner>.<n>`). Builds that know
++        // their own bundle counter (baked at package time) order same-base
++        // bundles exactly; anything else falls through to the gates.
++        const bundleUpgrade = isBundleCounterUpgrade(
++          readBakedBundleN(),
++          latestVersionTag,
++          currentVersion
++        );
++        if (bundleUpgrade) {
++          console.log('[AutoUpdater] Manual Check: Newer bundle build found!');
++        }
++        if (bundleUpgrade || this.isVersionNewer(currentVersion, latestVersion)) {
+           console.log('[AutoUpdater] Manual Check: New version found!');
+           this.updateAvailable = true;
+           this.updateDownloadState = 'available';
+@@ -3122,6 +3161,7 @@ export class AppState {
            };
  
            // Notify renderer
@@ -63,7 +95,7 @@ index 67c15a8..6c17177 100644
            this.broadcast("update-available", {
              ...info,
              parsedNotes: notes
-@@ -3131,11 +3157,19 @@ export class AppState {
+@@ -3131,11 +3171,19 @@ export class AppState {
            this.updateAvailable = false;
            this.updateDownloadState = 'idle';
            this.downloadedUpdateInfo = null;
@@ -83,7 +115,7 @@ index 67c15a8..6c17177 100644
      }
    }
  
-@@ -3338,6 +3372,10 @@ export class AppState {
+@@ -3338,6 +3386,10 @@ export class AppState {
  
    public async checkForUpdates(): Promise<void> {
      console.log('[AutoUpdater] Manual check for updates requested')
@@ -94,7 +126,7 @@ index 67c15a8..6c17177 100644
      try {
        // Use app.isPackaged, not NODE_ENV, matching every other updater gate in
        // this file (see canAutoInstall()) — a stray NODE_ENV=development in a
-@@ -3349,9 +3387,18 @@ export class AppState {
+@@ -3349,9 +3401,18 @@ export class AppState {
          await autoUpdater.checkForUpdatesAndNotify()
        }
      } catch (err: any) {
@@ -436,10 +468,10 @@ index 0000000..d64fdae
 +});
 diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
 new file mode 100644
-index 0000000..75e7369
+index 0000000..219fbc4
 --- /dev/null
 +++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,113 @@
 +// electron/services/__tests__/ForkPatch2Sources.test.mjs
 +//
 +// Source assertions for the second ForkHub patch (calendar direct auth,
@@ -509,6 +541,14 @@ index 0000000..75e7369
 +  assert.match(src, /client_secret: clientSecret/);
 +});
 +
++test('update-feed: bundle helpers exist for same-base rebuild ordering', () => {
++  const src = read('electron/update/updateFeed.ts');
++  assert.match(src, /parseBundleTag/);
++  assert.match(src, /isBundleCounterUpgrade/);
++  assert.match(src, /readBakedBundleN/);
++  assert.match(src, /forkhubBundleN/);
++});
++
 +test('version check: updater failures fall back to the catalog compare', () => {
 +  const src = read('electron/main.ts');
 +  assert.match(src, /manualCheckFallbackPending/);
@@ -524,6 +564,10 @@ index 0000000..75e7369
 +  // must follow the fh channel (whose fh-linux.yml build.sh publishes) —
 +  // channel='latest' matches nothing (ERR_UPDATER_NO_PUBLISHED_VERSIONS).
 +  assert.match(src, /autoUpdater\.channel = 'fh'/);
++  // Same-base rebuilds order by bundle counter (version gates cannot
++  // order bundle `-fh<N>` tags against updater versions).
++  assert.match(src, /isBundleCounterUpgrade/);
++  assert.match(src, /readBakedBundleN/);
 +});
 +
 +test('about: support opens original + fork sponsors, maintainer card present', () => {
