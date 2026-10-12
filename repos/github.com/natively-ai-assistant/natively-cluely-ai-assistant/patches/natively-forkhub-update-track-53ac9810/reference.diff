@@ -709,17 +709,17 @@ index 210fd47..f099efa 100644
      'setting channel enables downgrades; restore the default explicitly after it (F-707)');
 diff --git a/electron/update/updateFeed.test.mjs b/electron/update/updateFeed.test.mjs
 new file mode 100644
-index 0000000..ee8fb1c
+index 0000000..f19298e
 --- /dev/null
 +++ b/electron/update/updateFeed.test.mjs
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,74 @@
 +import test from 'node:test';
 +import assert from 'node:assert/strict';
 +import path from 'node:path';
 +import { fileURLToPath, pathToFileURL } from 'node:url';
 +
 +const __dirname = path.dirname(fileURLToPath(import.meta.url));
-+const { getUpdateFeed, extractVersionFromTag, apiReleaseUrl, latestReleasePageUrl, isForkCounterUpgrade } = await import(
++const { getUpdateFeed, extractVersionFromTag, apiReleaseUrl, latestReleasePageUrl, isForkCounterUpgrade, parseBundleTag, isBundleCounterUpgrade } = await import(
 +  pathToFileURL(path.resolve(__dirname, '../../dist-electron/electron/update/updateFeed.js')).href
 +);
 +
@@ -753,8 +753,7 @@ index 0000000..ee8fb1c
 +  assert.match(apiReleaseUrl('v2.8.1'), /releases\/tags\/v2\.8\.1$/);
 +});
 +
-+test('isForkCounterUpgrade orders same-owner rebuilds only', () => {
-+  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.1', '2.8.1-fh.imbios.2'), true);
++test('isForkCounterUpgrade orders same-owner rebuilds only', () => {  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.1', '2.8.1-fh.imbios.2'), true);
 +  assert.equal(isForkCounterUpgrade('2.8.1-fh.with-fh.1', '2.8.1-fh.with-fh.2'), true);
 +  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.2', '2.8.1-fh.imbios.2'), false);
 +  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.2', '2.8.1-fh.imbios.1'), false);
@@ -764,12 +763,36 @@ index 0000000..ee8fb1c
 +  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.1', '2.8.1-fh.someone.9'), false);
 +  assert.equal(isForkCounterUpgrade('2.8.1', '2.8.2'), false);
 +});
++
++test('parseBundleTag parses bundle tags, rejects the rest', () => {
++  assert.deepEqual(parseBundleTag('natively-ai-assistant-natively-cluely-ai-assistant--v2.9.2-fh6'), { base: '2.9.2', n: 6 });
++  assert.deepEqual(parseBundleTag('natively-ai-assistant-natively-cluely-ai-assistant--V2.9.2-fh1'), { base: '2.9.2', n: 1 });
++  assert.equal(parseBundleTag('v2.9.2-fh.with-fh.3'), null);
++  assert.equal(parseBundleTag('v2.9.2'), null);
++  assert.equal(parseBundleTag('garbage'), null);
++});
++
++test('isBundleCounterUpgrade orders same-base bundles by counter only', () => {
++  const B = 'natively-ai-assistant-natively-cluely-ai-assistant--v2.9.2-fh6';
++  // installed bundle 2, latest bundle 6 → newer
++  assert.equal(isBundleCounterUpgrade(2, B, '2.9.2-fh.with-fh.2'), true);
++  // equal / older counters → not newer
++  assert.equal(isBundleCounterUpgrade(6, B, '2.9.2-fh.with-fh.2'), false);
++  assert.equal(isBundleCounterUpgrade(9, B, '2.9.2-fh.with-fh.2'), false);
++  // unknown installed counter (pre-stamp builds, dev) → fall through (false)
++  assert.equal(isBundleCounterUpgrade(null, B, '2.9.2-fh.with-fh.2'), false);
++  assert.equal(isBundleCounterUpgrade(undefined, B, '2.9.2-fh.with-fh.2'), false);
++  // different base → not this rule's business
++  assert.equal(isBundleCounterUpgrade(2, B, '2.9.3-fh.with-fh.1'), false);
++  // non-bundle tag → not this rule's business
++  assert.equal(isBundleCounterUpgrade(2, 'v2.9.2-fh.with-fh.3', '2.9.2-fh.with-fh.2'), false);
++});
 diff --git a/electron/update/updateFeed.ts b/electron/update/updateFeed.ts
 new file mode 100644
-index 0000000..76a113c
+index 0000000..9b662be
 --- /dev/null
 +++ b/electron/update/updateFeed.ts
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,199 @@
 +/**
 + * electron/update/updateFeed.ts
 + *
@@ -899,6 +922,75 @@ index 0000000..76a113c
 +  const c = parse(current);
 +  const r = parse(remote);
 +  return !!c && !!r && c.owner === r.owner && r.n > c.n;
++}
++
++export interface BundleTagInfo {
++  /** Upstream base version, e.g. "2.9.2". */
++  base: string;
++  /** Bundle counter N in `<slug>--v<base>-fh<N>`. */
++  n: number;
++}
++
++/**
++ * Parses a ForkHub bundle tag
++ * (`<slug>--v<base>-fh<N>`, e.g.
++ * `natively-ai-assistant-natively-cluely-ai-assistant--v2.9.2-fh6`).
++ * Returns null for anything else (updater releases, stock tags).
++ */
++export function parseBundleTag(tag: string): BundleTagInfo | null {
++  const m = /--v?(\d+\.\d+\.\d+)-fh(\d+)$/i.exec(tag.trim());
++  if (!m) return null;
++  const n = parseInt(m[2], 10);
++  return Number.isFinite(n) ? { base: m[1], n } : null;
++}
++
++/**
++ * Bundle counter baked at package time (see build.sh `forkhubBundleN`).
++ * Null when this build predates the stamp (or in dev) — callers then fall
++ * back to the version gates. Lazy electron require keeps this module
++ * importable in plain node (see tests).
++ */
++export function readBakedBundleN(): number | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { app } = require("electron") as typeof import("electron");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const pathMod = require("path") as typeof import("path");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const fsMod = require("fs") as typeof import("fs");
++    const pkg = JSON.parse(
++      fsMod.readFileSync(pathMod.join(app.getAppPath(), "package.json"), "utf8")
++    );
++    const raw = pkg?.build?.extraMetadata?.forkhubBundleN;
++    const n = typeof raw === "number" ? raw : parseInt(String(raw ?? ""), 10);
++    return Number.isFinite(n) ? n : null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Bundle-counter ordering for the manual catalog compare (see main.ts
++ * checkForUpdatesManual): that compare resolves bundle tags, whose
++ * `-fh<N>` counters live in a different series than the installed updater
++ * version (`-fh.<owner>.<n>`), so the version gates cannot order them
++ * (same base compares equal, and the no-cross-talk guard refuses).
++ * When this build knows its own bundle counter and the latest tag is a
++ * same-base bundle, order by counter. Anything else returns false so
++ * callers fall through to the version gates (which own cross-base and
++ * updater-tag comparisons).
++ */
++export function isBundleCounterUpgrade(
++  installedN: number | null | undefined,
++  latestTag: string,
++  currentVersion: string
++): boolean {
++  if (installedN == null || !Number.isFinite(installedN)) return false;
++  const info = parseBundleTag(latestTag);
++  if (!info) return false;
++  const currentBase = currentVersion.replace(/^v/i, "").split("-")[0];
++  if (info.base !== currentBase) return false;
++  return info.n > installedN;
 +}
 diff --git a/package.json b/package.json
 index c9806cb..eb8edcf 100644

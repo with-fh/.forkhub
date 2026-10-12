@@ -68,6 +68,25 @@ FH_VERSION="${VER}-${SUFFIX}.${OWNER}.$((N + 1))"
 echo "FORKHUB_VERSION=$FH_VERSION" >> "${GITHUB_ENV:?}"
 say "# ForkHub build: github.com/natively-ai-assistant/natively-cluely-ai-assistant @ $TAG (as $FH_VERSION)"
 
+# ForkHub bundle counter: the in-app manual compare orders same-base
+# rebuilds by bundle N (see updateFeed.ts isBundleCounterUpgrade), so the
+# app must know which bundle build it is. N counts existing
+# `<slug>--<tag>-fhN` bundle releases for this target+tag (FORKHUB_TARGET
+# arrives from the shared workflow); this build ships as N+1. Same
+# best-effort caveat as FORKHUB_VERSION above: a failed publish can skip
+# a number; ordering stays monotonic regardless.
+if [ -n "${FORKHUB_TARGET:-}" ]; then
+  BUNDLE_SLUG=$(printf '%s' "$FORKHUB_TARGET" | awk -F/ '{print $(NF-1)"-"$NF}' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')
+  ESCAPED_TAG=$(printf '%s' "$TAG" | sed 's/\./\\./g')
+  BUNDLE_EXISTING=$(printf '%s\n' "$EXISTING_TAGS" | grep -cE "^${BUNDLE_SLUG}--${ESCAPED_TAG}-fh[0-9]+\$" || true)
+  BUNDLE_N=$((BUNDLE_EXISTING + 1))
+  say "stamping bundle counter $BUNDLE_N"
+  npm pkg set "build.extraMetadata.forkhubBundleN=$BUNDLE_N" >>"$LOG" 2>&1 \
+    || fail_soft "bundle counter stamp failed"
+else
+  say "no FORKHUB_TARGET — bundle counter unstamped (manual compare falls back to version gates)"
+fi
+
 # --- toolchain: node 22 (matches upstream release-macos.yml) ---
 HAVE_NODE=$(node --version 2>/dev/null | sed 's/^v//') || HAVE_NODE=""
 if [ "${HAVE_NODE%%.*}" = "22" ]; then

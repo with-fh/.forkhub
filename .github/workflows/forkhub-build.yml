@@ -271,6 +271,8 @@ jobs:
           # into extraMetadata (never logged by build.sh). Add the value in
           # repo Settings → Secrets; the name alone is safe to keep here.
           NATIVELY_GOOGLE_CLIENT_SECRET: ${{ secrets.NATIVELY_GOOGLE_CLIENT_SECRET }}
+          # Target slug for per-target bundle numbering (see build.sh).
+          FORKHUB_TARGET: ${{ matrix.pair.target }}
         run: |
           set -euo pipefail
           FH="$GITHUB_WORKSPACE/forkhub"
