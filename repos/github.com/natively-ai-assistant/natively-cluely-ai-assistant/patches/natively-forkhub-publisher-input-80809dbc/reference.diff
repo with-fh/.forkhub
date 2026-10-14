@@ -1,0 +1,613 @@
+diff --git a/electron/ipcHandlers.ts b/electron/ipcHandlers.ts
+index 20ed402..8275a4b 100644
+--- a/electron/ipcHandlers.ts
++++ b/electron/ipcHandlers.ts
+@@ -1205,6 +1205,27 @@ export function initializeIpcHandlers(appState: AppState): void {
+     return getUpdateFeed();
+   });
+ 
++  // ForkHub publisher override (Settings → Version → publisher input).
++  // Validates the candidate against its public catalog, persists it, and
++  // repoints the live updater feed — the next manual Check follows it.
++  safeHandle('set-update-feed-owner', async (_, owner: string) => {
++    try {
++      const { checkPublisherCatalog, writePersistedUpdateOwner, applyForkFeed, getUpdateFeed } =
++        require('./update/updateFeed');
++      const checked = await checkPublisherCatalog(owner);
++      if (!checked.ok) return checked;
++      writePersistedUpdateOwner(checked.owner);
++      const feed = getUpdateFeed();
++      const { autoUpdater } = require('electron-updater');
++      applyForkFeed(autoUpdater, feed);
++      console.log(`[IPC] Update publisher set to ${feed.owner}/${feed.repo}`);
++      return checked;
++    } catch (err: any) {
++      console.error('[IPC] set-update-feed-owner failed:', err);
++      return { ok: false, owner: '', repo: '.forkhub', releases: 0, message: err?.message ?? 'Failed to switch publisher.' };
++    }
++  });
++
+   safeHandle('get-recognition-languages', async () => {
+     return RECOGNITION_LANGUAGES;
+   });
+diff --git a/electron/preload.ts b/electron/preload.ts
+index 6dd5ee8..12c2020 100644
+--- a/electron/preload.ts
++++ b/electron/preload.ts
+@@ -893,6 +893,13 @@ interface ElectronAPI {
+   downloadUpdate: () => Promise<void>;
+   getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>;
+   getUpdateFeed: () => Promise<{ owner: string; repo: string }>;
++  setUpdateFeedOwner: (owner: string) => Promise<{
++    ok: boolean;
++    owner: string;
++    repo: string;
++    releases: number;
++    message: string;
++  }>;
+   testReleaseFetch: () => Promise<{ success: boolean; error?: string }>;
+ 
+   // RAG (Retrieval-Augmented Generation) API
+@@ -2808,6 +2815,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
+   downloadUpdate: () => ipcRenderer.invoke('download-update'),
+   getCanAutoUpdate: () => ipcRenderer.invoke('get-can-auto-update'),
+   getUpdateFeed: () => ipcRenderer.invoke('get-update-feed'),
++  setUpdateFeedOwner: (owner: string) => ipcRenderer.invoke('set-update-feed-owner', owner),
+   testReleaseFetch: () => ipcRenderer.invoke('test-release-fetch'),
+ 
+   // RAG API
+diff --git a/electron/update/updateFeed.ts b/electron/update/updateFeed.ts
+index 9b662be..f2e9b71 100644
+--- a/electron/update/updateFeed.ts
++++ b/electron/update/updateFeed.ts
+@@ -41,6 +41,70 @@ const envRepo =
+ export const UPDATE_FEED_OWNER = envOwner || "with-fh";
+ export const UPDATE_FEED_REPO = envRepo || ".forkhub";
+ 
++/**
++ * ForkHub publisher override (the "which account's catalog do I update
++ * from" input in Settings → Version).
++ *
++ * Resolution order for the effective feed owner:
++ *   1. persisted override (`forkhub-updater.json` in userData — written by
++ *      the `set-update-feed-owner` IPC after catalog validation),
++ *   2. `NATIVELY_UPDATE_OWNER` env (dev / build-time),
++ *   3. baked default (`with-fh`).
++ *
++ * Stock installs never see fork builds and vice versa even when the user
++ * types another owner: validation (`checkPublisherCatalog`) only accepts
++ * accounts whose public `.forkhub` catalog has published releases, and the
++ * updater keeps `allowPrerelease` + the `fh` channel + the fork-counter
++ * gates, so a foreign feed that carries no `-fh.<owner>.<n>` builds for
++ * this install can never resolve into an "upgrade".
++ */
++
++/** GitHub account login shape (also covers orgs): 1–39 chars. */
++export function normalizeUpdateOwner(input: unknown): string | null {
++  if (typeof input !== "string") return null;
++  const v = input.trim().toLowerCase();
++  if (/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(v)) return v;
++  return null;
++}
++
++function persistedOwnerPath(): string | null {
++  try {
++    // Lazy electron require keeps this module importable in plain node
++    // (see tests) — same pattern as readBakedBundleN below.
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { app } = require("electron") as typeof import("electron");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const pathMod = require("path") as typeof import("path");
++    return pathMod.join(app.getPath("userData"), "forkhub-updater.json");
++  } catch {
++    return null;
++  }
++}
++
++/** Persisted publisher override, or null when unset/invalid/unreadable. */
++export function readPersistedUpdateOwner(): string | null {
++  try {
++    const p = persistedOwnerPath();
++    if (!p) return null;
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const fsMod = require("fs") as typeof import("fs");
++    const raw = JSON.parse(fsMod.readFileSync(p, "utf8"));
++    return normalizeUpdateOwner(raw?.owner);
++  } catch {
++    return null;
++  }
++}
++
++/** Persist a validated publisher override. Throws on invalid input. */
++export function writePersistedUpdateOwner(owner: string): void {
++  const norm = normalizeUpdateOwner(owner);
++  if (!norm) throw new Error(`Invalid GitHub owner: ${owner}`);
++  const p = persistedOwnerPath();
++  if (!p) throw new Error("userData unavailable — cannot persist update publisher");
++  // eslint-disable-next-line @typescript-eslint/no-var-requires
++  require("fs").writeFileSync(p, JSON.stringify({ owner: norm }, null, 2));
++}
++
+ /** Tag namespace for Natively installer releases inside the shared catalog. */
+ export const UPDATE_CATALOG_TAG_PREFIX =
+   "natively-ai-assistant-natively-cluely-ai-assistant--";
+@@ -55,7 +119,140 @@ export interface UpdateFeed {
+ }
+ 
+ export function getUpdateFeed(): UpdateFeed {
+-  return { owner: UPDATE_FEED_OWNER, repo: UPDATE_FEED_REPO };
++  const persisted = readPersistedUpdateOwner();
++  const owner = persisted ?? UPDATE_FEED_OWNER;
++  return { owner, repo: UPDATE_FEED_REPO };
++}
++
++/**
++ * Catalog validation for a publisher candidate (T3 parity: releases, not
++ * just the account). Accepts only when the public `{owner}/.forkhub`
++ * catalog carries at least one published, non-draft release. Private
++ * catalogs are unsupported — the check is unauthenticated, so only
++ * discoverable public releases count.
++ */
++export interface PublisherCatalogCheck {
++  ok: boolean;
++  owner: string;
++  repo: string;
++  /** Counted usable (published, non-draft) releases. */
++  releases: number;
++  message: string;
++}
++
++export function summarizePublisherReleases(releases: unknown): number {
++  if (!Array.isArray(releases)) return 0;
++  let n = 0;
++  for (const r of releases) {
++    if (r && typeof r === "object" && (r as any).draft !== true) n++;
++  }
++  return n;
++}
++
++export async function checkPublisherCatalog(
++  owner: string,
++  fetchImpl?: typeof fetch
++): Promise<PublisherCatalogCheck> {
++  const norm = normalizeUpdateOwner(owner);
++  const repo = UPDATE_FEED_REPO;
++  if (!norm) {
++    return {
++      ok: false,
++      owner: String(owner ?? "").trim(),
++      repo,
++      releases: 0,
++      message: "Enter a GitHub username or org (1–39 chars: letters, numbers, hyphens).",
++    };
++  }
++  const url = `https://api.github.com/repos/${norm}/${repo}/releases?per_page=100`;
++  let response: Response;
++  try {
++    const run =
++      fetchImpl ??
++      ((u: string) =>
++        fetch(u, {
++          headers: {
++            Accept: "application/vnd.github+json",
++            "User-Agent": "natively-forkhub-updater",
++          },
++        }));
++    response = await run(url);
++  } catch {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: "Could not reach github.com — check your connection and try again.",
++    };
++  }
++  if (response.status === 404) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: `No public ${repo} repo for '${norm}' — publish a ForkHub catalog first.`,
++    };
++  }
++  if (response.status === 403) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: "GitHub rate-limited the check — wait a minute and try again.",
++    };
++  }
++  if (!response.ok) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: `GitHub lookup failed (HTTP ${response.status}) — try again.`,
++    };
++  }
++  const releases = await response.json().catch(() => null);
++  const usable = summarizePublisherReleases(releases);
++  if (usable === 0) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: `'${norm}/${repo}' has no published releases yet — nothing to update from.`,
++    };
++  }
++  return {
++    ok: true,
++    owner: norm,
++    repo,
++    releases: usable,
++    message: `Updating from ${norm}/${repo} releases.`,
++  };
++}
++
++/**
++ * Runtime twin of the feed block in main.ts setupAutoUpdater (which the
++ * F-707 source test pins — do not refactor that block; keep this in sync):
++ * follow the `fh` channel on the given feed with prereleases allowed and
++ * the library-side downgrade filter restored. `updater` is duck-typed so
++ * this module stays importable in plain node.
++ */
++export function applyForkFeed(
++  updater: {
++    setFeedURL: (opts: { provider: string; owner: string; repo: string }) => void;
++    channel: string;
++    allowDowngrade: boolean;
++    allowPrerelease: boolean;
++  },
++  feed: UpdateFeed
++): void {
++  updater.channel = "fh";
++  updater.allowDowngrade = false;
++  updater.setFeedURL({ provider: "github", owner: feed.owner, repo: feed.repo });
++  updater.allowPrerelease = true;
+ }
+ 
+ export function isUpstreamFeed(feed?: UpdateFeed): boolean {
+diff --git a/electron/update/updatePublisher.test.mjs b/electron/update/updatePublisher.test.mjs
+new file mode 100644
+index 0000000..f2bb0e2
+--- /dev/null
++++ b/electron/update/updatePublisher.test.mjs
+@@ -0,0 +1,174 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const {
++  normalizeUpdateOwner,
++  summarizePublisherReleases,
++  checkPublisherCatalog,
++  applyForkFeed,
++  getUpdateFeed,
++} = await import(
++  pathToFileURL(path.resolve(__dirname, '../../dist-electron/electron/update/updateFeed.js')).href
++);
++
++test('normalizeUpdateOwner accepts GitHub login shapes, lowercases', () => {
++  assert.equal(normalizeUpdateOwner('with-fh'), 'with-fh');
++  assert.equal(normalizeUpdateOwner('  With-FH  '), 'with-fh');
++  assert.equal(normalizeUpdateOwner('a'), 'a');
++  assert.equal(normalizeUpdateOwner('x'.repeat(39)), 'x'.repeat(39));
++});
++
++test('normalizeUpdateOwner rejects bad input', () => {
++  assert.equal(normalizeUpdateOwner(''), null);
++  assert.equal(normalizeUpdateOwner('   '), null);
++  assert.equal(normalizeUpdateOwner('has space'), null);
++  assert.equal(normalizeUpdateOwner('under_score'), null);
++  assert.equal(normalizeUpdateOwner('-lead'), null);
++  assert.equal(normalizeUpdateOwner('trail-'), null);
++  assert.equal(normalizeUpdateOwner('x'.repeat(40)), null);
++  assert.equal(normalizeUpdateOwner(null), null);
++  assert.equal(normalizeUpdateOwner(undefined), null);
++  assert.equal(normalizeUpdateOwner(42), null);
++});
++
++test('summarizePublisherReleases counts published non-drafts only', () => {
++  assert.equal(summarizePublisherReleases(null), 0);
++  assert.equal(summarizePublisherReleases({}), 0);
++  assert.equal(summarizePublisherReleases([]), 0);
++  assert.equal(
++    summarizePublisherReleases([
++      { tag_name: 'v1', draft: false },
++      { tag_name: 'v2' },
++      { tag_name: 'v3', draft: true },
++      { tag_name: 'v4', prerelease: true, draft: false },
++    ]),
++    3
++  );
++});
++
++function stubFetch(handler) {
++  const calls = [];
++  const fn = async (url, init) => {
++    calls.push({ url, init });
++    return handler(url);
++  };
++  fn.calls = calls;
++  return fn;
++}
++
++const okReleases = (items) => ({
++  ok: true,
++  status: 200,
++  json: async () => items,
++});
++
++test('checkPublisherCatalog accepts an owner with published releases', async () => {
++  const fetchImpl = stubFetch(() =>
++    okReleases([{ tag_name: 'a', draft: false }, { tag_name: 'b', draft: true }])
++  );
++  const res = await checkPublisherCatalog('With-FH', fetchImpl);
++  assert.equal(res.ok, true);
++  assert.equal(res.owner, 'with-fh');
++  assert.equal(res.repo, '.forkhub');
++  assert.equal(res.releases, 1);
++  assert.match(fetchImpl.calls[0].url, /\/repos\/with-fh\/\.forkhub\/releases/);
++});
++
++test('checkPublisherCatalog rejects invalid owner without fetching', async () => {
++  const fetchImpl = stubFetch(() => okReleases([]));
++  const res = await checkPublisherCatalog('bad owner!', fetchImpl);
++  assert.equal(res.ok, false);
++  assert.equal(fetchImpl.calls.length, 0);
++});
++
++test('checkPublisherCatalog rejects empty catalogs', async () => {
++  const fetchImpl = stubFetch(() => okReleases([{ tag_name: 'd', draft: true }]));
++  const res = await checkPublisherCatalog('with-fh', fetchImpl);
++  assert.equal(res.ok, false);
++  assert.match(res.message, /no published releases/i);
++});
++
++test('checkPublisherCatalog maps 404 / 403 / 500 / network failure', async () => {
++  const notFound = await checkPublisherCatalog(
++    'ghost',
++    stubFetch(() => ({ ok: false, status: 404, json: async () => ({}) }))
++  );
++  assert.equal(notFound.ok, false);
++  assert.match(notFound.message, /No public/i);
++
++  const limited = await checkPublisherCatalog(
++    'with-fh',
++    stubFetch(() => ({ ok: false, status: 403, json: async () => ({}) }))
++  );
++  assert.equal(limited.ok, false);
++  assert.match(limited.message, /rate-limited/i);
++
++  const broken = await checkPublisherCatalog(
++    'with-fh',
++    stubFetch(() => ({ ok: false, status: 500, json: async () => ({}) }))
++  );
++  assert.equal(broken.ok, false);
++  assert.match(broken.message, /HTTP 500/);
++
++  const offline = await checkPublisherCatalog('with-fh', async () => {
++    throw new Error('boom');
++  });
++  assert.equal(offline.ok, false);
++  assert.match(offline.message, /connection/i);
++});
++
++test('applyForkFeed follows the fh channel with prereleases, no downgrade', () => {
++  const calls = [];
++  const updater = {
++    set channel(v) {
++      calls.push(['channel', v]);
++      // Mirror electron-updater's F-707 setter clobber.
++      this.allowDowngrade = true;
++    },
++    setFeedURL: (opts) => calls.push(['setFeedURL', opts]),
++  };
++  let flags = { allowDowngrade: undefined, allowPrerelease: undefined };
++  Object.defineProperties(updater, {
++    allowDowngrade: {
++      get: () => flags.allowDowngrade,
++      set: (v) => {
++        flags.allowDowngrade = v;
++        calls.push(['allowDowngrade', v]);
++      },
++    },
++    allowPrerelease: {
++      get: () => flags.allowPrerelease,
++      set: (v) => {
++        flags.allowPrerelease = v;
++        calls.push(['allowPrerelease', v]);
++      },
++    },
++  });
++  applyForkFeed(updater, { owner: 'with-fh', repo: '.forkhub' });
++  const kinds = calls.map((c) => c[0]);
++  assert.deepEqual(kinds, ['channel', 'allowDowngrade', 'allowDowngrade', 'setFeedURL', 'allowPrerelease']);
++  // The restore must come AFTER the setter clobber (F-707).
++  assert.equal(calls[kinds.lastIndexOf('allowDowngrade')][1], false);
++  assert.deepEqual(calls.find((c) => c[0] === 'setFeedURL')[1], {
++    provider: 'github',
++    owner: 'with-fh',
++    repo: '.forkhub',
++  });
++  assert.equal(flags.allowPrerelease, true);
++});
++
++test('getUpdateFeed defaults to with-fh/.forkhub in plain node (no persisted store)', () => {
++  const savedOwner = process.env.NATIVELY_UPDATE_OWNER;
++  const savedRepo = process.env.NATIVELY_UPDATE_REPO;
++  delete process.env.NATIVELY_UPDATE_OWNER;
++  delete process.env.NATIVELY_UPDATE_REPO;
++  try {
++    assert.deepEqual(getUpdateFeed(), { owner: 'with-fh', repo: '.forkhub' });
++  } finally {
++    if (savedOwner !== undefined) process.env.NATIVELY_UPDATE_OWNER = savedOwner;
++    if (savedRepo !== undefined) process.env.NATIVELY_UPDATE_REPO = savedRepo;
++  }
++});
+diff --git a/src/components/SettingsOverlay.tsx b/src/components/SettingsOverlay.tsx
+index e37af56..4b28461 100644
+--- a/src/components/SettingsOverlay.tsx
++++ b/src/components/SettingsOverlay.tsx
+@@ -797,6 +797,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+     const [isThemeDropdownOpen, setIsThemeDropdownOpen] = useState(false);
+     const [isAiLangDropdownOpen, setIsAiLangDropdownOpen] = useState(false);
+     const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'uptodate' | 'error'>('idle');
++    // ForkHub publisher override: which account's `.forkhub` catalog this
++    // install updates from (default `with-fh`). Mirrors T3 Code's ForkHub
++    // publisher row — input + Check above the update button.
++    const [publisherInput, setPublisherInput] = useState<string | null>(null);
++    const [publisherFeed, setPublisherFeed] = useState<{ owner: string; repo: string } | null>(null);
++    const [publisherCheck, setPublisherCheck] = useState<
++        { status: 'idle' } | { status: 'checking' } | { status: 'valid'; releases: number } | { status: 'invalid'; message: string }
++    >({ status: 'idle' });
+     const themeDropdownRef = React.useRef<HTMLDivElement>(null);
+     const aiLangDropdownRef = React.useRef<HTMLDivElement>(null);
+     const [meetingInterfaceTheme, setMeetingInterfaceThemeState] = useState<MeetingInterfaceTheme>(getMeetingInterfaceTheme);
+@@ -2042,9 +2050,44 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+         }
+     };
+ 
++    const publisherValue = publisherInput ?? publisherFeed?.owner ?? '';
++    const isCheckingPublisher = publisherCheck.status === 'checking';
++
++    const handlePublisherCheck = async () => {
++        if (isCheckingPublisher) return;
++        const typed = publisherValue.trim();
++        if (!typed) {
++            setPublisherCheck({ status: 'invalid', message: t('Enter a GitHub username or org first.') });
++            return;
++        }
++        setPublisherCheck({ status: 'checking' });
++        try {
++            // @ts-ignore
++            const result = await window.electronAPI?.setUpdateFeedOwner?.(typed);
++            if (result?.ok) {
++                setPublisherFeed({ owner: result.owner, repo: result.repo });
++                setPublisherInput(null);
++                setPublisherCheck({ status: 'valid', releases: result.releases });
++                // The feed is repointed — run a Check against it right away.
++                handleCheckForUpdates();
++            } else {
++                setPublisherCheck({ status: 'invalid', message: result?.message ?? t('Publisher check failed.') });
++            }
++        } catch (e: any) {
++            console.error("Failed to set update publisher:", e);
++            setPublisherCheck({ status: 'invalid', message: e?.message ?? t('Publisher check failed.') });
++        }
++    };
++
+     useEffect(() => {
+         if (!isOpen) return;
+ 
++        // Effective update feed (persisted publisher override or default).
++        // @ts-ignore
++        window.electronAPI?.getUpdateFeed?.().then((feed: any) => {
++            if (feed?.owner) setPublisherFeed({ owner: feed.owner, repo: feed.repo ?? '.forkhub' });
++        }).catch(() => {});
++
+         const unsubs = [
+             window.electronAPI.onUpdateChecking(() => {
+                 setUpdateStatus('checking');
+@@ -2823,6 +2866,75 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+                                                     </div>
+                                                 </div>
+ 
++                                                {/* ForkHub publisher: which account's `.forkhub`
++                                                    catalog this install updates from. The Check
++                                                    validates the catalog, persists the owner, and
++                                                    repoints the updater feed. */}
++                                                <div className="flex items-center justify-between gap-4 px-4 py-3">
++                                                    <div className="flex items-center gap-4 min-w-0">
++                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
++                                                            <Globe size={20} />
++                                                        </div>
++                                                        <div className="min-w-0">
++                                                            <h3 className="text-sm font-bold text-text-primary">{t('ForkHub publisher')}</h3>
++                                                            <p className="text-xs text-text-secondary mt-0.5">
++                                                                {publisherFeed
++                                                                    ? t('Updating from releases.')
++                                                                    : t('Profile or org whose .forkhub releases this app updates from.')}
++                                                            </p>
++                                                            {publisherFeed && (
++                                                                <p className="text-xs text-text-tertiary mt-0.5 tabular-nums">
++                                                                    {publisherFeed.owner}/{publisherFeed.repo}
++                                                                </p>
++                                                            )}
++                                                            {publisherCheck.status === 'valid' ? (
++                                                                <p className="text-xs text-green-400 mt-0.5">
++                                                                    {t('Publisher connected — catalog releases:')} {publisherCheck.releases}
++                                                                </p>
++                                                            ) : publisherCheck.status === 'invalid' ? (
++                                                                <p className="text-xs text-red-400 mt-0.5" role="alert">
++                                                                    {publisherCheck.message}
++                                                                </p>
++                                                            ) : null}
++                                                        </div>
++                                                    </div>
++                                                    <div className="flex items-center gap-2 shrink-0">
++                                                        <input
++                                                            value={publisherValue}
++                                                            onChange={(e) => {
++                                                                setPublisherInput(e.target.value);
++                                                                setPublisherCheck({ status: 'idle' });
++                                                            }}
++                                                            onKeyDown={(e) => {
++                                                                if (e.key === 'Enter') void handlePublisherCheck();
++                                                            }}
++                                                            placeholder="with-fh"
++                                                            aria-label={t('ForkHub profile or org')}
++                                                            autoComplete="off"
++                                                            spellCheck={false}
++                                                            data-1p-ignore
++                                                            className="bg-bg-input border border-border-subtle text-text-primary px-2.5 py-1.5 rounded-lg text-xs font-medium w-[130px] placeholder:text-text-tertiary focus:outline-none focus:border-text-tertiary transition-colors"
++                                                        />
++                                                        <button
++                                                            onClick={() => void handlePublisherCheck()}
++                                                            disabled={isCheckingPublisher || publisherValue.trim().length === 0}
++                                                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center justify-center gap-2 shrink-0 min-w-[80px] bg-bg-component hover:bg-bg-elevated text-text-primary border-border-subtle disabled:opacity-50 disabled:cursor-wait"
++                                                        >
++                                                            {isCheckingPublisher ? (
++                                                                <>
++                                                                    <RefreshCw size={14} className="animate-spin" />
++                                                                    {t('Checking')}
++                                                                </>
++                                                            ) : (
++                                                                <>
++                                                                    <Check size={14} />
++                                                                    {t('Check')}
++                                                                </>
++                                                            )}
++                                                        </button>
++                                                    </div>
++                                                </div>
++
+                                                 {/* Version. items-center like the Theme and Language rows:
+                                                     items-start pinned the Check button 5px above their
+                                                     buttons, which sit on their tile's centre line. */}
+diff --git a/src/types/electron.d.ts b/src/types/electron.d.ts
+index d13eacf..dc83a9e 100644
+--- a/src/types/electron.d.ts
++++ b/src/types/electron.d.ts
+@@ -986,6 +986,13 @@ export interface ElectronAPI {
+   downloadUpdate: () => Promise<void>
+   getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>
+   getUpdateFeed: () => Promise<{ owner: string; repo: string }>
++  setUpdateFeedOwner: (owner: string) => Promise<{
++    ok: boolean;
++    owner: string;
++    repo: string;
++    releases: number;
++    message: string;
++  }>
+   testReleaseFetch: () => Promise<{ success: boolean; error?: string }>
+ 
+   // RAG (Retrieval-Augmented Generation) API

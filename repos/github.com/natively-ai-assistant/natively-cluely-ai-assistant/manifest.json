@@ -31,16 +31,26 @@
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "natively/linux-dock-icon",
       "last_realized_against_commit": "a2485e4"
+    },
+    "natively-forkhub-publisher-input-80809dbc": {
+      "status": "draft",
+      "version": 1,
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "natively/forkhub-publisher-input",
+      "last_realized_against_commit": "b439c1f0"
     }
   },
   "apply_order": [
     "natively-forkhub-update-track-53ac9810",
     "natively-fork-ux-and-checks-f1c3d2a8",
-    "natively-linux-dock-icon-a7e2c41b"
+    "natively-linux-dock-icon-a7e2c41b",
+    "natively-forkhub-publisher-input-80809dbc"
   ],
   "slug_aliases": {
     "natively-forkhub-update-track": "natively-forkhub-update-track-53ac9810",
     "natively-fork-ux-and-checks": "natively-fork-ux-and-checks-f1c3d2a8",
-    "natively-linux-dock-icon": "natively-linux-dock-icon-a7e2c41b"
+    "natively-linux-dock-icon": "natively-linux-dock-icon-a7e2c41b",
+    "natively-forkhub-publisher-input": "natively-forkhub-publisher-input-80809dbc"
   }
 }
