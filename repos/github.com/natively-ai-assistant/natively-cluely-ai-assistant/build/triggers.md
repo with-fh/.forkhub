@@ -11,9 +11,11 @@ Default choice (mirrors the t3code target; user-explicit change welcome):
   applies — a push with no new upstream tag only rebuilds with force).
 - **Manual (`workflow_dispatch`, optional `target` filter, `force`
   flag): build.** Rebuilds and on-demand ForkHub releases; `force=true`
-  rebuilds even an already-built tag. First Linux build: dispatch with
+  rebuilds even an already-built tag. First build: dispatch with
   `target: github.com/natively-ai-assistant/natively-cluely-ai-assistant`
-  (or push this target dir — same effect).
+  (or push this target dir — same effect). One leg per OS runs
+  (`ubuntu-latest`, `macos-14`, `windows-latest`); per-OS skip markers
+  mean a finished leg never blocks the others.
 
 To change the poll cadence, edit the cron in
 `.github/workflows/forkhub-build.yml` (shared file — affects all targets).

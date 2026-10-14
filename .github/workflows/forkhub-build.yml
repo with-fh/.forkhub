@@ -12,6 +12,14 @@ name: forkhub build
 # Trains: a target lists release trains in upstream.json:trains
 # (e.g. ["stable", "nightly"]); the build matrix fans out to one job per
 # (target, train). Absent trains means ["default"]: legacy newest-tag behavior.
+#
+# OS legs: a target lists builder OSs in upstream.json:build_runs_on
+# (e.g. ["ubuntu-latest", "macos-14", "windows-latest"]); the matrix fans
+# out to one job per (target, train, os). Absent means ["ubuntu-latest"]:
+# legacy single-OS behavior. Each leg builds its native artifacts and
+# uploads them into the SAME shared releases (per-OS skip markers in
+# upstream.json:build_skip_markers, e.g. {"linux": "*.AppImage"},
+# make resume/idempotence per-OS).
 
 on:
   push:
@@ -58,22 +66,40 @@ jobs:
             [ -f "$m" ] || continue
             t=$(dirname "$m" | sed 's|^repos/||')
             if [ -n "$FILTER" ] && [ "$t" != "$FILTER" ]; then continue; fi
+            U="repos/$t/upstream.json"
+            RUNS=$(jq -r '(.build_runs_on // ["ubuntu-latest"])[]' "$U")
+            SOLE="true"
+            [ "$(printf '%s\n' "$RUNS" | wc -l)" -gt 1 ] && SOLE="false" || true
             for train in $(jq -r '(.trains // ["default"])[]' "repos/$t/upstream.json"); do
               if [ -n "$TRAIN_FILTER" ] && [ "$train" != "$TRAIN_FILTER" ]; then continue; fi
-              jq -n --arg t "$t" --arg train "$train" '{target: $t, train: $train}'
+              for os in $RUNS; do
+                case "$os" in
+                  ubuntu-*) os_key=linux;;
+                  macos-*) os_key=mac;;
+                  windows-*) os_key=win;;
+                  *) os_key=linux;;
+                esac
+                jq -n --arg t "$t" --arg train "$train" --arg os "$os" \
+                  --arg os_key "$os_key" --argjson sole "$SOLE" \
+                  '{target: $t, train: $train, os: $os, os_key: $os_key, sole: $sole}'
+              done
             done
           done | jq -cs .)
           echo "builds=$BUILDS" >> "$GITHUB_OUTPUT"
 
   build:
-    name: build ${{ matrix.pair.target }} ${{ matrix.pair.train }}
+    name: build ${{ matrix.pair.target }} ${{ matrix.pair.train }} (${{ matrix.pair.os_key }})
     needs: [discover]
     if: needs.discover.outputs.builds != '[]'
     strategy:
       fail-fast: false
       matrix:
         pair: ${{ fromJson(needs.discover.outputs.builds) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.pair.os }}
+    # Windows runners default to pwsh — every step below is POSIX sh.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v6
         with:
@@ -93,6 +119,8 @@ jobs:
           echo "upstream_url=$(jq -r .upstream_url "$U")" >> "$GITHUB_OUTPUT"
           echo "upstream_branch=$(jq -r '.upstream_main_branch // "main"' "$U")" >> "$GITHUB_OUTPUT"
           echo "order=$(jq -c .apply_order "$M")" >> "$GITHUB_OUTPUT"
+          # Per-OS skip marker glob for this leg (empty = legacy behavior).
+          echo "os_marker=$(jq -r --arg k "${{ matrix.pair.os_key }}" '.build_skip_markers[$k] // empty' "$U")" >> "$GITHUB_OUTPUT"
 
       - name: "Clone upstream at latest tag (fallback: main branch)"
         run: |
@@ -131,10 +159,18 @@ jobs:
           if [ -n "$IGNORE" ]; then
             TAGS=$(printf '%s\n' "$TAGS" | grep -v -E -- "$IGNORE" || true)
           fi
-          # Newest-first pick, case-insensitive so a capital-V tag (e.g.
-          # V2.8.8) beats an older lowercase one. Original tag casing is
-          # preserved for `git clone --branch`, which needs the exact case.
-          TAG=$(printf '%s\n' "$TAGS" | awk 'NF { print tolower($0) "\t" $0 }' | sort -V -k1,1 | cut -f2- | tail -1 || true)
+          # Newest-first pick. Portable across GNU/BSD sort (macOS lacks
+          # `sort -V`): natural version order via python3, case-insensitive
+          # so a capital-V tag (e.g. V2.8.8) beats an older lowercase one.
+          # Original tag casing is preserved for `git clone --branch`,
+          # which needs the exact case.
+          TAG=$(printf '%s\n' "$TAGS" | awk 'NF' | python3 -c "
+          import sys, re
+          def key(s):
+              return [int(x) if x.isdigit() else x.lower() for x in re.split('([0-9]+)', s)]
+          tags = sorted(set(l.rstrip('\n') for l in sys.stdin if l.strip()), key=key)
+          print(tags[-1] if tags else '')
+          " || true)
           if [ -n "$TAG" ]; then
             git clone --depth 1 --branch "$TAG" "$URL" build
             echo "$TAG" > upstream_tag.txt
@@ -168,6 +204,8 @@ jobs:
           esac
           echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
           SKIP="false"
+          OS_KEY="${{ matrix.pair.os_key }}"
+          MARKER="${{ steps.ctx.outputs.os_marker }}"
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "forced rebuild of $UP"
           elif [ "$UP" = "v0.0.0" ]; then
@@ -175,7 +213,24 @@ jobs:
           else
             TAGS=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
             BASE=$(printf '%s' "$UP" | sed 's/^v//;s/\./\\./g')
-            if [ -n "$SUFFIX" ] \
+            if [ -n "$MARKER" ]; then
+              # Multi-OS target: skip only when the newest matching updater
+              # release already carries this OS leg's marker asset, so a
+              # finished linux leg never blocks the mac/win legs (and a
+              # resumed leg reuses the same release number — see build.sh).
+              RX=$(printf '%s' "$MARKER" | sed 's/\./\\./g; s/\*/.*/g')
+              # Portable newest-pick (no `sort -V` on macOS): matching tags
+              # differ only in the trailing .N counter — order by it.
+              LATEST=$(printf '%s\n' "$TAGS" | grep -E "^v${BASE}[-.]${SUFFIX}\\.[a-z0-9-]+\\.[0-9]+\$" | sed -E 's/^.*\.([0-9]+)$/\1 &/' | sort -n | tail -1 | sed -E 's/^[0-9]+ //' || true)
+              if [ -n "$LATEST" ] \
+                && gh release view "$LATEST" --repo "$GITHUB_REPOSITORY" --json assets \
+                     --jq '.assets[].name' 2>/dev/null | grep -qE "^${RX}\$"; then
+                echo "$UP already has $OS_KEY artifacts in $LATEST; skipping"
+                SKIP="true"
+              else
+                echo "$UP has no $OS_KEY artifacts yet; building"
+              fi
+            elif [ -n "$SUFFIX" ] \
               && printf '%s\n' "$TAGS" | grep -qE "^v${BASE}[-.]${SUFFIX}\\.[a-z0-9-]+\\.[0-9]+\$"; then
               echo "$UP already has a $SUFFIX updater release; skipping"
               SKIP="true"
@@ -273,6 +328,11 @@ jobs:
           NATIVELY_GOOGLE_CLIENT_SECRET: ${{ secrets.NATIVELY_GOOGLE_CLIENT_SECRET }}
           # Target slug for per-target bundle numbering (see build.sh).
           FORKHUB_TARGET: ${{ matrix.pair.target }}
+          # OS leg identity for multi-OS targets (see build.sh numbering
+          # reuse + per-OS checksums). Single-OS targets ignore these.
+          FORKHUB_OS_KEY: ${{ matrix.pair.os_key }}
+          FORKHUB_OS_MARKER: ${{ steps.ctx.outputs.os_marker }}
+          FORKHUB_OS_SOLE: ${{ matrix.pair.sole }}
         run: |
           set -euo pipefail
           FH="$GITHUB_WORKSPACE/forkhub"
@@ -289,6 +349,12 @@ jobs:
             tar -czf "$GITHUB_WORKSPACE/dist/$SLUG-patched-source.tar.gz" -C "$BD" .
           fi
           (cd "$GITHUB_WORKSPACE/dist" && sha256sum * > SHA256SUMS || shasum -a 256 * > SHA256SUMS)
+          # Multi-OS legs share one bundle release: a single SHA256SUMS would
+          # be clobbered per leg, so each leg also ships a per-OS copy that
+          # covers exactly its own files (sole-leg targets keep legacy shape).
+          if [ "${{ matrix.pair.sole }}" != "true" ]; then
+            cp "$GITHUB_WORKSPACE/dist/SHA256SUMS" "$GITHUB_WORKSPACE/dist/SHA256SUMS-${{ matrix.pair.os_key }}"
+          fi
 
       - name: Publish updater-channel release (target hook)
         # Optional per-target hook for updater feeds (e.g. electron-updater's
@@ -330,4 +396,39 @@ jobs:
               cat "repos/${{ matrix.pair.target }}/build/CONSUME.md"
             fi
           } > "$NOTES"
-          gh release create "$TAG" $GITHUB_WORKSPACE/dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file "$NOTES"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Multi-OS legs share one bundle release: upload this leg's
+            # files into it. A bare SHA256SUMS would clobber a sibling
+            # leg's, so multi-OS legs exclude it — per-OS
+            # SHA256SUMS-<os> copies cover each leg's own files.
+            # Sole-leg targets keep the legacy shape (SHA256SUMS included).
+            if [ "${{ matrix.pair.sole }}" = "true" ]; then
+              # shellcheck disable=SC2086
+              (cd "$GITHUB_WORKSPACE/dist" && gh release upload "$TAG" * --repo "$GITHUB_REPOSITORY" --clobber)
+            else
+              # shellcheck disable=SC2086
+              FILES=$(cd "$GITHUB_WORKSPACE/dist" && ls * | grep -vx 'SHA256SUMS' || true)
+              if [ -n "$FILES" ]; then
+                # shellcheck disable=SC2086
+                (cd "$GITHUB_WORKSPACE/dist" && gh release upload "$TAG" $FILES --repo "$GITHUB_REPOSITORY" --clobber)
+              fi
+            fi
+          else
+            gh release create "$TAG" $GITHUB_WORKSPACE/dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file "$NOTES" \
+              || {
+                # Lost a race with a parallel leg that created it first.
+                echo "create raced; uploading into existing $TAG"
+                sleep 10
+                if [ "${{ matrix.pair.sole }}" = "true" ]; then
+                  # shellcheck disable=SC2086
+                  (cd "$GITHUB_WORKSPACE/dist" && gh release upload "$TAG" * --repo "$GITHUB_REPOSITORY" --clobber)
+                else
+                  # shellcheck disable=SC2086
+                  FILES=$(cd "$GITHUB_WORKSPACE/dist" && ls * | grep -vx 'SHA256SUMS' || true)
+                  if [ -n "$FILES" ]; then
+                    # shellcheck disable=SC2086
+                    (cd "$GITHUB_WORKSPACE/dist" && gh release upload "$TAG" $FILES --repo "$GITHUB_REPOSITORY" --clobber)
+                  fi
+                fi
+              }
+          fi

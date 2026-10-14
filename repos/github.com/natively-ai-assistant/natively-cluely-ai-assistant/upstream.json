@@ -7,5 +7,15 @@
   "last_known_upstream_sha": "4a06f12",
   "last_synced_at": "2026-09-28T06:45:23Z",
   "schedule": "on-upstream-release",
-  "version_suffix": "fh"
+  "version_suffix": "fh",
+  "build_runs_on": [
+    "ubuntu-latest",
+    "macos-14",
+    "windows-latest"
+  ],
+  "build_skip_markers": {
+    "linux": "*.AppImage",
+    "mac": "*.dmg",
+    "win": "*.exe"
+  }
 }
