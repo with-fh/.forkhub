@@ -10,7 +10,7 @@
   "version_suffix": "fh",
   "build_runs_on": [
     "ubuntu-latest",
-    "macos-14",
+    "macos-26",
     "windows-latest"
   ],
   "build_skip_markers": {

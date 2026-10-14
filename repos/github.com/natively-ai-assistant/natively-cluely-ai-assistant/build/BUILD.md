@@ -1,7 +1,7 @@
 # Build — github.com/natively-ai-assistant/natively-cluely-ai-assistant (ForkHub, all OSs)
 
 Repo-native build for the ForkHub Natively channel. Runs one workflow leg
-per OS (`upstream.json:build_runs_on`: `ubuntu-latest`, `macos-14`,
+per OS (`upstream.json:build_runs_on`: `ubuntu-latest`, `macos-26`,
 `windows-latest`) after the intent stack is applied and `verify.sh`
 passes. The catalog follows upstream **stable** (newest lowercase-`v`
 tag; see the tag note below). Each build carries a ForkHub provenance
@@ -16,7 +16,7 @@ Linux set official CI does not publish:
 | leg | artifacts |
 |---|---|
 | linux (`ubuntu-latest`) | `Natively-*.AppImage`, `natively_*_amd64.deb`, `latest-linux.yml` + `fh-linux.yml` |
-| mac (`macos-14`, unsigned) | `Natively-*.dmg` + `Natively-*.zip` (arm64 + x64), `latest-mac.yml` + `fh-mac.yml` |
+| mac (`macos-26`, unsigned) | `Natively-*.dmg` + `Natively-*.zip` (arm64 + x64), `latest-mac.yml` + `fh-mac.yml` |
 | win (`windows-latest`, unsigned) | `Natively-Setup-*.exe` (nsis) + portable `*.exe`, `latest.yml` + `fh.yml` |
 
 Every leg also emits `*.blockmap` sidecars (differential updates) and a
@@ -87,8 +87,10 @@ deb, checksums, build log, notes).
 - **Unsigned mac/Windows.** No Developer ID / certs in this catalog, so
   mac builds skip signing + notarization + stapling (upstream's
   `release-macos.yml` does all three) and Windows ships unsigned NSIS.
-  First launch needs right-click → Open (mac) / "More info → Run anyway"
-  (SmartScreen). The app itself is identical; only OS trust differs.
+  mac legs run on `macos-26`: electron-builder 26 requires Xcode 26+
+  (`actool`), which older images lack. First launch needs right-click →
+  Open (mac) / "More info → Run anyway" (SmartScreen). The app itself is
+  identical; only OS trust differs.
 - **Same product name.** The fork build keeps upstream's `productName`
   and appId, so installing it cleanly replaces a stock install and
   inherits its data — the intended migration path. Only artifact

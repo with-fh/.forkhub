@@ -278,7 +278,7 @@ jobs:
           # paths would resolve inside the build checkout (bug).
           FH="$GITHUB_WORKSPACE/forkhub"
           BD="$GITHUB_WORKSPACE/build"
-          for id in $(jq -r '.apply_order[]' "$FH/repos/${{ matrix.pair.target }}/manifest.json"); do
+          for id in $(jq -r '.apply_order[]' "$FH/repos/${{ matrix.pair.target }}/manifest.json" | tr -d '\r'); do
             p="$FH/repos/${{ matrix.pair.target }}/patches/$id"
             echo "→ $id"
             # Per-train realizations: a patch may carry reference.<train>.diff

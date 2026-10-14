@@ -251,7 +251,6 @@ if [ "$OS_KEY" = "mac" ]; then
   say "mac packaged deps"
   node scripts/ensure-sharp-mac-deps.js >>"$LOG" 2>&1 || say "ensure-sharp-mac-deps failed; continuing"
   node scripts/ensure-napi-canvas-mac-deps.js >>"$LOG" 2>&1 || say "ensure-napi-canvas-mac-deps failed; continuing"
-  node scripts/ensure-node-llama-cpp-mac-deps.js >>"$LOG" 2>&1 || say "ensure-node-llama-cpp-mac-deps failed; continuing"
   node scripts/ensure-sqlite-vec.js >>"$LOG" 2>&1 || say "ensure-sqlite-vec failed; continuing"
 else
   say "native module"

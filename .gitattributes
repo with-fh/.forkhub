@@ -1,0 +1,4 @@
+# All runners check out LF: Windows images default core.autocrlf=true,
+# which would give every text file CRLF and break shell globs, jq reads
+# (`id\r`), end-anchored greps, and `git apply` on the Windows legs.
+* text=auto eol=lf
