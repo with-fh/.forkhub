@@ -41,7 +41,9 @@ across legs sharing one bundle release).
    client id/secret extraMetadata when the env is present, and (linux
    only) stamps the deb maintainer identity.
 6. Mirrors `app:build` per OS: vite build, electron typecheck + bundle,
-   native module (mac: `NATIVELY_BUILD_ALL_MAC_ARCHES=1` + both-arch
+   sourcemap strip (`*.map` under `dist/` + `dist-electron/` — 1.26 GB
+   of duplicated per-entry maps in v2.9.2; upstream ships them, the
+   fork does not), native module (mac: `NATIVELY_BUILD_ALL_MAC_ARCHES=1` + both-arch
    canvas/llama/sqlite ensures, mirroring upstream `release-macos.yml`,
    so the x64 pack does not ship armless PDF extraction — the v2.8.7
    lesson), then `electron-builder` with `--linux AppImage deb` /

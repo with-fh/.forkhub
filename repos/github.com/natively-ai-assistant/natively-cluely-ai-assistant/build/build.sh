@@ -241,6 +241,13 @@ say "electron typecheck"
 npm run typecheck:electron >>"$LOG" 2>&1 || fail_soft "electron typecheck failed"
 say "electron bundle"
 npm run build:electron >>"$LOG" 2>&1 || fail_soft "electron bundle failed"
+# --- strip sourcemaps (1.26 GB in v2.9.2: esbuild emits one ~21 MB
+# bundle + ~46 MB map PER electron entry point, all duplicated, plus
+# renderer maps — dead weight in a shipped app with no devtools).
+# Measured on the v2.9.2 AppImage: 1257 MB of *.map inside app.asar.
+# Upstream ships them; the fork does not.
+say "stripping sourcemaps"
+find dist dist-electron -name '*.map' -delete >>"$LOG" 2>&1 || fail_soft "sourcemap strip failed"
 if [ "$OS_KEY" = "mac" ]; then
   # Both darwin arches from one arm64 runner (mirrors upstream
   # release-macos.yml): the runner cross-builds the Intel package, and
