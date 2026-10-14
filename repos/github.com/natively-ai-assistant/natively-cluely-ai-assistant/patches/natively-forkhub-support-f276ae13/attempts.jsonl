@@ -1,0 +1,1 @@
+{"n":1,"phase":"squash","timestamp":"2026-10-14T10:49:50Z","upstream_tag":"v2.9.2","upstream_sha":"b439c1f0","approach":"squashed update-track v7 + fork-ux-and-checks v4 + linux-dock-icon v1 + publisher-input v1 into one ForkHub-support patch, no behavior change; union verify green (35/35)","result":"passed","tokens":0,"model":"manual"}

@@ -1,0 +1,2676 @@
+diff --git a/electron/ipcHandlers.ts b/electron/ipcHandlers.ts
+index 360ee01..8275a4b 100644
+--- a/electron/ipcHandlers.ts
++++ b/electron/ipcHandlers.ts
+@@ -457,7 +457,17 @@ export function initializeIpcHandlers(appState: AppState): void {
+       const orchestrator = appState.getKnowledgeOrchestrator();
+       if (!orchestrator) return;
+       orchestrator.setKnowledgeMode(false);
+-      const { DocType } = require('../premium/electron/knowledge/types');
++      // FORKHUB-OSS: try-wrapped so esbuild leaves this require unbundled
++      // and `build:electron` succeeds without the private premium/
++      // submodule (see electron/premium/featureGate.ts). Unreachable in
++      // practice — without premium there is no orchestrator (returned above).
++      let DocType: any;
++      try {
++        DocType = require('../premium/electron/knowledge/types').DocType;
++      } catch {
++        console.warn('[IPC] trial wipe: premium knowledge types unavailable; skipping document wipe');
++        return;
++      }
+       orchestrator.deleteDocumentsByType(DocType.RESUME);
+       orchestrator.deleteDocumentsByType(DocType.JD);
+       // …and their raw-text indexes (text + vectors under profile:<kind>:<version>).
+@@ -1181,13 +1191,41 @@ export function initializeIpcHandlers(appState: AppState): void {
+   });
+   safeHandle('license:get-hardware-id', async () => {
+     try {
+-      const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+-      return LicenseManager.getInstance().getHardwareId();
++      const { getStableHardwareId } = require('./services/HardwareId');
++      return getStableHardwareId();
+     } catch {
+       return 'unavailable';
+     }
+   });
+ 
++  // ForkHub update feed for renderer-side links (manual download fallback).
++  // The updater itself is repointed main-side via autoUpdater.setFeedURL.
++  safeHandle('get-update-feed', async () => {
++    const { getUpdateFeed } = require('./update/updateFeed');
++    return getUpdateFeed();
++  });
++
++  // ForkHub publisher override (Settings → Version → publisher input).
++  // Validates the candidate against its public catalog, persists it, and
++  // repoints the live updater feed — the next manual Check follows it.
++  safeHandle('set-update-feed-owner', async (_, owner: string) => {
++    try {
++      const { checkPublisherCatalog, writePersistedUpdateOwner, applyForkFeed, getUpdateFeed } =
++        require('./update/updateFeed');
++      const checked = await checkPublisherCatalog(owner);
++      if (!checked.ok) return checked;
++      writePersistedUpdateOwner(checked.owner);
++      const feed = getUpdateFeed();
++      const { autoUpdater } = require('electron-updater');
++      applyForkFeed(autoUpdater, feed);
++      console.log(`[IPC] Update publisher set to ${feed.owner}/${feed.repo}`);
++      return checked;
++    } catch (err: any) {
++      console.error('[IPC] set-update-feed-owner failed:', err);
++      return { ok: false, owner: '', repo: '.forkhub', releases: 0, message: err?.message ?? 'Failed to switch publisher.' };
++    }
++  });
++
+   safeHandle('get-recognition-languages', async () => {
+     return RECOGNITION_LANGUAGES;
+   });
+@@ -11998,30 +12036,29 @@ export function initializeIpcHandlers(appState: AppState): void {
+       const { CredentialsManager } = require('./services/CredentialsManager');
+       const cm = CredentialsManager.getInstance();
+ 
+-      // Get hardware ID for HWID-binding.
+-      //
+-      // F-601: this MUST be a real per-machine identity. LicenseManager
+-      // returns the literal string 'unavailable' when the native module
+-      // failed to load (its own JSDoc scopes that value to "display to the
+-      // user for support purposes"), and the trial row is keyed
+-      // `hwid text NOT NULL UNIQUE` server-side. Sending the sentinel makes
+-      // every machine with a broken native module collide on ONE
+-      // free_trials row: the server's idempotent re-issue branch hands back
+-      // a valid signed trial token for a STRANGER's trial, exposing their
+-      // usage counters and billing every request against their quota.
+-      // Fail closed instead — a trial that cannot be bound to this machine
+-      // must not be started.
+-      let hwid = '';
++      // Stable device binding (see electron/services/HardwareId.ts): resolve
++      // native module → premium LicenseManager → OS machine id → persisted
++      // install id. This replaces upstream's LicenseManager-only lookup
++      // (whose F-601 fail-closed guard fired on EVERY submodule-less
++      // install): the fallback chain reaches the refusal below only when
++      // nothing stable exists at all.
++      // Never send a placeholder to the server: it rejects those and burns
++      // one of the rate-limit slots for nothing.
++      const { getStableHardwareId, isPlaceholderHardwareId } = require('./services/HardwareId');
++      let hwid: string;
+       try {
+-        const { LicenseManager } = require('../premium/electron/services/LicenseManager');
+-        hwid = LicenseManager.getInstance().getHardwareId() || '';
+-      } catch {
+-        /* LicenseManager not available — handled by the guard below */
++        hwid = getStableHardwareId();
++      } catch (err: any) {
++        console.error('[IPC] trial:start: no stable hardware id:', err?.message);
++        reportStart({ hwidUnavailable: true });
++        return { ok: false, error: 'invalid_hwid' };
+       }
+-      if (!hwid || hwid === 'unavailable') {
+-        console.error('[Trial] Refusing to start a trial without a real hardware id (native module unavailable).');
++      if (isPlaceholderHardwareId(hwid)) {
++        // Fail closed (upstream F-601): a trial that cannot be bound to
++        // this machine must not start.
++        console.error('[IPC] trial:start: refusing placeholder hardware id');
+         reportStart({ hwidUnavailable: true });
+-        return { ok: false, error: 'hardware_id_unavailable' };
++        return { ok: false, error: 'invalid_hwid' };
+       }
+ 
+       // install_id / app_version / platform let the server tie this trial to
+diff --git a/electron/main.ts b/electron/main.ts
+index 506b10d..e2bb761 100644
+--- a/electron/main.ts
++++ b/electron/main.ts
+@@ -26,6 +26,7 @@ import { installResilientDnsLookup } from "./utils/resilientDnsLookup"
+ import { resolveDebugLogPath } from "./utils/debugLogPath.mjs"
+ import { MeetingLifecycleQueue, type MeetingLifecycleState } from "./audio/meetingLifecycleQueue"
+ import { autoUpdater } from "electron-updater"
++import { extractVersionFromTag, getUpdateFeed, isBundleCounterUpgrade, isForkCounterUpgrade, readBakedBundleN } from "./update/updateFeed"
+ import { summarizeUpdateDownload } from "./update/updateDownloadSummary"
+ 
+ import {
+@@ -1450,6 +1451,14 @@ export class AppState {
+   // Last `total` from download-progress; smaller than the file when the download was differential.
+   private lastUpdateProgressTotal: number | null = null
+   private downloadedUpdateInfo: any = null
++  /**
++   * True while a user-initiated Check is unresolved. electron-updater
++   * reports check failures BOTH as a rejected checkForUpdates() promise
++   * and as an async 'error' event; the flag makes exactly one path run
++   * the catalog-compare fallback (see checkForUpdates + on("error")).
++   * Download errors always arrive with this false and broadcast as today.
++   */
++  private manualCheckFallbackPending = false
+   private disguiseMode: 'terminal' | 'settings' | 'activity' | 'none' = 'none'
+ 
+   // View management
+@@ -2950,8 +2959,17 @@ export class AppState {
+       console.warn('[AutoUpdater] Could not read feed URL:', feedErr)
+     }
+ 
+-    // Default to latest (stable) channel - matches latest.yml generated by electron-builder
+-    autoUpdater.channel = 'latest'
++    // ForkHub channel: the shared `.forkhub` catalog carries many targets
++    // and EVERY fork release tag is `fh`-channeled
++    // (`<ver>-fh.<owner>.<n>`). electron-updater matches the configured
++    // channel against each tag's prerelease channel, so `channel='latest'`
++    // matches NOTHING here (every check ends in
++    // ERR_UPDATER_NO_PUBLISHED_VERSIONS) — follow the `fh` channel, whose
++    // `fh-linux.yml` manifest build.sh publishes alongside
++    // latest-linux.yml. Unset would fall back to the current version's
++    // prerelease tag (also `fh` on fork builds), but explicit is
++    // predictable on every version shape.
++    autoUpdater.channel = 'fh'
+     // F-707: electron-updater's `channel` SETTER ends with
+     // `this.allowDowngrade = true` (verified in the installed 6.x copy;
+     // documented in its own JSDoc). So the line above silently disabled the
+@@ -2963,12 +2981,26 @@ export class AppState {
+     autoUpdater.allowDowngrade = false
+     console.log(`[AutoUpdater] Channel: ${autoUpdater.channel} (allowDowngrade=${autoUpdater.allowDowngrade})`)
+ 
++    // ForkHub feed: follow the fork's own catalog (GitHub Releases of the
++    // `.forkhub` intent repo — see electron/update/updateFeed.ts), NOT the
++    // upstream author's repo. Without this a patched install would be
++    // offered (or silently handed) stock builds, and vice versa.
++    // Fork versions carry a `-fh.<owner>.<n>` suffix, which is semver
++    // pre-release shaped, so prereleases must be allowed on this feed.
++    // The feed contains only fork builds, so no stock prerelease can leak in.
++    const feed = getUpdateFeed()
++    autoUpdater.setFeedURL({ provider: 'github', owner: feed.owner, repo: feed.repo } as any)
++    autoUpdater.allowPrerelease = true
++    console.log(`[AutoUpdater] Feed: github ${feed.owner}/${feed.repo} (allowPrerelease=true)`)
++
+     autoUpdater.on("checking-for-update", () => {
+       console.log("[AutoUpdater] Checking for update...")
+       this.broadcast("update-checking")
+     })
+ 
+     autoUpdater.on("update-available", async (info) => {
++      // A manual Check resolves here — disarm the catalog fallback.
++      this.manualCheckFallbackPending = false
+       // PHASE-2A: refuse non-upgrades (downgrade, equal, malformed). electron-updater
+       // normally already filters this, but we belt-and-brace it: a stale latest.yml on
+       // GitHub (or a republish with the wrong tag) must NEVER cause us to invite the
+@@ -3010,6 +3042,8 @@ export class AppState {
+     })
+ 
+     autoUpdater.on("update-not-available", (info) => {
++      // A manual Check resolves here — disarm the catalog fallback.
++      this.manualCheckFallbackPending = false
+       console.log("[AutoUpdater] Update not available:", info.version)
+       this.updateAvailable = false
+       this.updateDownloadState = 'idle'
+@@ -3021,6 +3055,19 @@ export class AppState {
+       console.error("[AutoUpdater] Error:", err)
+       this.updateDownloadState = this.updateAvailable ? 'available' : 'idle'
+       this.updateDownloadPromise = null
++      // ForkHub: if this error belongs to an unresolved manual Check (no
++      // download in flight — downloads never set the flag), answer from the
++      // catalog compare instead of showing Error. The flag is cleared
++      // synchronously first so the rejected checkForUpdates() promise below
++      // cannot trigger a second fallback. Non-check errors broadcast as before.
++      if (this.manualCheckFallbackPending) {
++        this.manualCheckFallbackPending = false
++        this.checkForUpdatesManual().catch((fallbackErr: any) => {
++          console.error('[AutoUpdater] catalog fallback failed:', fallbackErr)
++          this.broadcast("update-error", fallbackErr?.message || 'Update check failed')
++        })
++        return
++      }
+       // Include more details in the error message for debugging
+       const errorMessage = err.message || err.toString() || 'Unknown update error'
+       this.broadcast("update-error", errorMessage)
+@@ -3075,12 +3122,29 @@ export class AppState {
+ 
+       if (notes) {
+         const currentVersion = app.getVersion();
+-        const latestVersionTag = notes.version; // e.g., "v1.2.0" or "1.2.0"
+-        const latestVersion = latestVersionTag.replace(/^v/, '');
++        // Catalog tags are namespaced (`<slug>--v2.8.1-fh1`, possibly
++        // capital-V like `<slug>--V2.8.8-fh1`) — extract the trailing
++        // version before comparing (see extractVersionFromTag).
++        const latestVersionTag = notes.version; // e.g., "v1.2.0", "1.2.0", or "<slug>--V2.8.8-fh1"
++        const latestVersion = extractVersionFromTag(latestVersionTag);
+ 
+         console.log(`[AutoUpdater] Manual Check: Current=${currentVersion}, Latest=${latestVersion}`);
+ 
+-        if (this.isVersionNewer(currentVersion, latestVersion)) {
++        // Bundle-counter rule first: the catalog compare resolves bundle
++        // tags (`<slug>--v<base>-fh<N>`), whose counters the version gates
++        // below cannot order (same base strips equal, and the no-cross-talk
++        // guard refuses `-fh<N>` vs `-fh.<owner>.<n>`). Builds that know
++        // their own bundle counter (baked at package time) order same-base
++        // bundles exactly; anything else falls through to the gates.
++        const bundleUpgrade = isBundleCounterUpgrade(
++          readBakedBundleN(),
++          latestVersionTag,
++          currentVersion
++        );
++        if (bundleUpgrade) {
++          console.log('[AutoUpdater] Manual Check: Newer bundle build found!');
++        }
++        if (bundleUpgrade || this.isVersionNewer(currentVersion, latestVersion)) {
+           console.log('[AutoUpdater] Manual Check: New version found!');
+           this.updateAvailable = true;
+           this.updateDownloadState = 'available';
+@@ -3097,6 +3161,7 @@ export class AppState {
+           };
+ 
+           // Notify renderer
++          this.manualCheckFallbackPending = false
+           this.broadcast("update-available", {
+             ...info,
+             parsedNotes: notes
+@@ -3106,11 +3171,19 @@ export class AppState {
+           this.updateAvailable = false;
+           this.updateDownloadState = 'idle';
+           this.downloadedUpdateInfo = null;
++          this.manualCheckFallbackPending = false;
+           this.broadcast("update-not-available", { version: currentVersion });
+         }
++      } else {
++        // The catalog lookup itself failed (no network, empty catalog) —
++        // broadcast instead of leaving the Check button stuck on Checking.
++        console.warn('[AutoUpdater] Manual Check: no release notes available.');
++        this.manualCheckFallbackPending = false
++        this.broadcast("update-error", 'Could not reach the update feed. Check your connection and try again.');
+       }
+     } catch (err) {
+       console.error('[AutoUpdater] Manual update check failed:', err);
++      this.manualCheckFallbackPending = false
+     }
+   }
+ 
+@@ -3127,6 +3200,16 @@ export class AppState {
+       if (lv > cv) return true;
+       if (lv < cv) return false;
+     }
++    // ForkHub: same numeric base (suffixes stripped above) — order fork
++    // rebuilds by their `-fh.<owner>.<n>` counter so dev manual checks see
++    // them. Checked BEFORE the F-708 prerelease rule below: two fork builds
++    // with different counters both carry `-` and would otherwise fall
++    // through to false. Stock↔fork and cross-owner pairs stay refused.
++    if (isForkCounterUpgrade(current, latest)) return true;
++    // ForkHub: a fork build must never "upgrade" to a stock version of the
++    // same base (F-708's pre→stable rule would otherwise allow
++    // `2.8.8-fh.with-fh.1` → `2.8.8`). No stock/fork cross-talk.
++    if (current.includes('-fh.') && !latest.includes('-fh.')) return false;
+     // F-708: same equal-after-stripping case as isRealUpgrade — a prerelease is
+     // older than the stable of the same version, so beta -> stable is newer.
+     if (/-/.test(current) && !/-/.test(latest)) return true;
+@@ -3169,6 +3252,17 @@ export class AppState {
+       if (r[i] > c[i]) return true
+       if (r[i] < c[i]) return false
+     }
++    // ForkHub: same numeric base (suffixes stripped above) — order fork
++    // rebuilds by their `-fh.<owner>.<n>` counter, otherwise a fork rebuild
++    // (`2.8.8-fh.with-fh.1` → `2.8.8-fh.with-fh.2`) compares equal and would
++    // be refused as a "non-upgrade". Checked BEFORE the F-708 prerelease
++    // rule below for the same reason. Stock↔fork and cross-owner pairs stay
++    // refused (see updateFeed.isForkCounterUpgrade).
++    if (isForkCounterUpgrade(current, remote)) return true
++    // ForkHub: a fork build must never "upgrade" to a stock version of the
++    // same base (F-708's pre→stable rule would otherwise allow
++    // `2.8.8-fh.with-fh.1` → `2.8.8`). No stock/fork cross-talk.
++    if (String(current).includes('-fh.') && !String(remote).includes('-fh.')) return false
+     // F-708: numerically equal after stripping pre-release suffixes. Stripping
+     // BOTH operands makes 2.1.0-beta.2 -> 2.1.0 compare equal, so a user on a
+     // prerelease was told "update not available" for the matching stable and
+@@ -3292,6 +3386,10 @@ export class AppState {
+ 
+   public async checkForUpdates(): Promise<void> {
+     console.log('[AutoUpdater] Manual check for updates requested')
++    // Arm the catalog-compare fallback: updater check failures surface both
++    // as a rejected promise AND as an async 'error' event, and exactly one
++    // of those paths must answer the Check (see manualCheckFallbackPending).
++    this.manualCheckFallbackPending = true
+     try {
+       // Use app.isPackaged, not NODE_ENV, matching every other updater gate in
+       // this file (see canAutoInstall()) — a stray NODE_ENV=development in a
+@@ -3303,9 +3401,18 @@ export class AppState {
+         await autoUpdater.checkForUpdatesAndNotify()
+       }
+     } catch (err: any) {
+-      console.error('[AutoUpdater] checkForUpdates failed:', err)
+-      const errorMessage = err.message || err.toString() || 'Update check failed'
+-      this.broadcast("update-error", errorMessage)
++      // If the 'error' event already ran the fallback it cleared the flag;
++      // otherwise the updater failed without an event — fall back now.
++      if (!this.manualCheckFallbackPending) return
++      this.manualCheckFallbackPending = false
++      console.error('[AutoUpdater] checkForUpdates failed, trying catalog compare:', err?.message)
++      try {
++        await this.checkForUpdatesManual()
++      } catch (fallbackErr: any) {
++        console.error('[AutoUpdater] catalog fallback failed:', fallbackErr)
++        const errorMessage = fallbackErr?.message || err?.message || err?.toString() || 'Update check failed'
++        this.broadcast("update-error", errorMessage)
++      }
+     }
+   }
+ 
+@@ -8966,6 +9073,36 @@ async function initializeApp() {
+   // 2. Wait for app to be ready
+   logStartupPhase('before-app-whenReady');
+   await app.whenReady()
++
++  // LINUX-ONLY dock/pin association (see build/linux desktop entry).
++  // Electron derives the X11 WM_CLASS from the app name, which defaults to
++  // package.json `name` ("natively"), while the shipped .desktop file
++  // declares StartupWMClass=Natively. The mismatch leaves GNOME with a
++  // generic icon and no pin-to-dock. Fix both sides deterministically:
++  //   1. Pin userData to its historical location FIRST. getPath('userData')
++  //      is derived from the app name, and the first resolution below
++  //      (logStartupPhase) still uses the package name — renaming must not
++  //      move existing profiles. A pre-existing capitalized profile (from
++  //      any build that renamed first) is respected instead of orphaned.
++  //   2. Set the name to the product name BEFORE any window exists.
++  // Disguise modes still rename later via _applyDisguise (stealth intact);
++  // macOS/Windows sequencing is untouched (deliberately gated).
++  if (process.platform === 'linux') {
++    try {
++      const legacyDir = path.join(app.getPath('appData'), 'natively');
++      let userDataDir = legacyDir;
++      try {
++        if (!fs.existsSync(legacyDir)) {
++          const capitalized = path.join(app.getPath('appData'), 'Natively');
++          if (fs.existsSync(capitalized)) userDataDir = capitalized;
++        }
++      } catch { /* fall back to the historical location */ }
++      app.setPath('userData', userDataDir);
++    } catch (err) { console.warn('[Init] Linux userData pin failed (non-fatal):', err); }
++    try {
++      app.setName('Natively');
++    } catch (err) { console.warn('[Init] Linux setName failed (non-fatal):', err); }
++  }
+   nativeOomTrace.initialize()
+   nativeOomTrace.record('app-ready', {
+     pid: process.pid,
+diff --git a/electron/preload.ts b/electron/preload.ts
+index 9416bec..12c2020 100644
+--- a/electron/preload.ts
++++ b/electron/preload.ts
+@@ -892,6 +892,14 @@ interface ElectronAPI {
+   checkForUpdates: () => Promise<void>;
+   downloadUpdate: () => Promise<void>;
+   getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>;
++  getUpdateFeed: () => Promise<{ owner: string; repo: string }>;
++  setUpdateFeedOwner: (owner: string) => Promise<{
++    ok: boolean;
++    owner: string;
++    repo: string;
++    releases: number;
++    message: string;
++  }>;
+   testReleaseFetch: () => Promise<{ success: boolean; error?: string }>;
+ 
+   // RAG (Retrieval-Augmented Generation) API
+@@ -2806,6 +2814,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
+   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+   downloadUpdate: () => ipcRenderer.invoke('download-update'),
+   getCanAutoUpdate: () => ipcRenderer.invoke('get-can-auto-update'),
++  getUpdateFeed: () => ipcRenderer.invoke('get-update-feed'),
++  setUpdateFeedOwner: (owner: string) => ipcRenderer.invoke('set-update-feed-owner', owner),
+   testReleaseFetch: () => ipcRenderer.invoke('test-release-fetch'),
+ 
+   // RAG API
+diff --git a/electron/services/CalendarManager.ts b/electron/services/CalendarManager.ts
+index 507f78a..57e192f 100644
+--- a/electron/services/CalendarManager.ts
++++ b/electron/services/CalendarManager.ts
+@@ -37,6 +37,81 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
+ const DEFAULT_CALENDAR_CLIENT_ID = '814531619520-80ib40f38i5vdeg0j8kk81r0usojrt9a.apps.googleusercontent.com';
+ const DEFAULT_CALENDAR_CLIENT_SECRET = process.env.NATIVELY_BAKED_CALENDAR_CLIENT_SECRET || '';
+ 
++// ForkHub: a fork build may carry its OWN Google OAuth (Desktop) client id
++// instead of the stock one above — selected here, in one place, so the
++// stock direct flow below behaves exactly as before when no fork client is
++// configured. A fork client id arrives either baked into the packaged app
++// (`build.extraMetadata.nativelyGoogleClientId`, stamped from
++// NATIVELY_GOOGLE_CLIENT_ID at package time) or, for dev, via
++// GOOGLE_CALENDAR_CLIENT_ID together with NATIVELY_CALENDAR_DIRECT=1.
++// Fork-owned clients are public clients: token calls for them carry no
++// secret (see electron/services/calendarPkce.ts).
++const GOOGLE_CLIENT_ID_PLACEHOLDER = 'YOUR_CLIENT_ID_HERE';
++
++/**
++ * Public Desktop OAuth client id for the fork's own Google Cloud project
++ * ("Natively ForkHub"). A client ID is a PUBLIC identifier — it ships in
++ * every build and appears in auth URLs by design; the PKCE direct flow
++ * uses no secret, so there is nothing sensitive here.
++ */
++const FORK_DEFAULT_CLIENT_ID =
++  '303200007953-jsb6cjl3vdev3j0pthdkju8v6hm4q5qv.apps.googleusercontent.com';
++
++/** Client id baked into the packaged app by the fork's release build (if any). */
++function readForkGoogleClientId(): string | null {
++    try {
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const { app } = require('electron') as typeof import('electron');
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const pathMod = require('path') as typeof import('path');
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const fsMod = require('fs') as typeof import('fs');
++        const pkg = JSON.parse(fsMod.readFileSync(pathMod.join(app.getAppPath(), 'package.json'), 'utf8'));
++        const id = pkg?.nativelyGoogleClientId;
++        return typeof id === 'string' && id.trim() && id !== GOOGLE_CLIENT_ID_PLACEHOLDER ? id.trim() : null;
++    } catch {
++        return null;
++    }
++}
++
++interface CalendarClientConfig {
++    clientId: string;
++    /** Fork-owned public client (true, no secret sent) vs stock client (false). */
++    direct: boolean;
++}
++
++function resolveCalendarClient(): CalendarClientConfig {
++    const forkId = readForkGoogleClientId();
++    if (forkId) return { clientId: forkId, direct: true };
++    const envId = (process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '').trim();
++    if (envId && envId !== GOOGLE_CLIENT_ID_PLACEHOLDER) {
++        return { clientId: envId, direct: process.env.NATIVELY_CALENDAR_DIRECT === '1' };
++    }
++    // Fork catalog builds (and only those — gated on the packaged publish
++    // owner, so upstream checkouts keep the stock client) fall back to
++    // the maintainer's public Desktop client, making Connect calendar work
++    // out of the box with zero configuration. Explicit configuration above
++    // always wins.
++    if (isForkCatalogBuild()) return { clientId: FORK_DEFAULT_CLIENT_ID, direct: true };
++    return { clientId: DEFAULT_CALENDAR_CLIENT_ID, direct: false };
++}
++
++/**
++ * Whether this build updates from a fork catalog rather than upstream.
++ * Determined from the packaged publish config (the same source of truth
++ * the updater feed uses), so stock builds can never take this branch.
++ */
++function isForkCatalogBuild(): boolean {
++    try {
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const { getUpdateFeed, UPSTREAM_OWNER } = require('./update/updateFeed');
++        const feed = getUpdateFeed();
++        return !!feed?.owner && feed.owner !== UPSTREAM_OWNER;
++    } catch {
++        return false;
++    }
++}
++
+ const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+ const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
+@@ -66,13 +141,62 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
+ /** Token-endpoint errors that mean the stored grant is dead and reconnecting is the only fix. */
+ const DEAD_GRANT_ERRORS = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client', 'deleted_client']);
+ 
+-function calendarOAuthClient(): { id: string; secret: string } {
++/** Stable code for "the build cannot do calendar OAuth": no usable client id or secret. */
++export const CALENDAR_NOT_CONFIGURED = 'calendar_not_configured';
++
++/** Friendly copy for the above — shown on the callback page and under the connect button. */
++export const CALENDAR_NOT_CONFIGURED_COPY =
++    'Calendar isn\u2019t set up for this build yet (Google OAuth isn\u2019t configured).';
++
++/** Fork client secret resolution (mirrors readForkGoogleClientId, secret flavor). */
++function readForkGoogleClientSecret(): string | null {
++    try {
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const { app } = require('electron') as typeof import('electron');
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const pathMod = require('path') as typeof import('path');
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        const fsMod = require('fs') as typeof import('fs');
++        const pkg = JSON.parse(fsMod.readFileSync(pathMod.join(app.getAppPath(), 'package.json'), 'utf8'));
++        const secret = pkg?.nativelyGoogleClientSecret;
++        return typeof secret === 'string' && secret.trim() ? secret.trim() : null;
++    } catch {
++        return null;
++    }
++}
++
++function calendarOAuthClient(): { id: string; secret: string; direct: boolean } {
++    const { clientId, direct } = resolveCalendarClient();
++    // Fork-owned client: Google requires the client secret at the token
++    // endpoint even for Desktop clients using PKCE (absent → 400
++    // `invalid_request: client_secret is missing.`). The secret ships baked
++    // into the packaged app (never committed to source) or via env for dev;
++    // stock keeps its baked/env secret exactly as before.
++    if (direct) {
++        const secret =
++            readForkGoogleClientSecret() ||
++            (process.env.NATIVELY_GOOGLE_CLIENT_SECRET || '').trim();
++        return { id: clientId, secret, direct };
++    }
+     return {
+-        id: process.env.GOOGLE_CALENDAR_CLIENT_ID || DEFAULT_CALENDAR_CLIENT_ID,
++        id: process.env.GOOGLE_CALENDAR_CLIENT_ID || clientId,
+         secret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET || DEFAULT_CALENDAR_CLIENT_SECRET,
++        direct,
+     };
+ }
+ 
++/** True when an error means calendar OAuth can never succeed on this build. */
++export function isCalendarNotConfigured(error: unknown): boolean {
++    const code = (error as any)?.code;
++    if (code === CALENDAR_NOT_CONFIGURED) return true;
++    const msg = String((error as any)?.message || error || '');
++    return (
++        msg.includes(CALENDAR_NOT_CONFIGURED) ||
++        msg.includes('client_secret is missing') ||
++        /calendar[^.]{0,80}not configured/i.test(msg)
++    );
++}
++
+ function base64Url(buf: Buffer): string {
+     return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+ }
+@@ -235,7 +359,16 @@ export class CalendarManager extends EventEmitter {
+         // page that says "OAuth client not found", the user never hits the
+         // callback, and the loopback server below leaks.
+         if (!client.id) {
+-            throw new Error('Calendar sync is not configured in this build (no Google OAuth client ID).');
++            throw new Error('Calendar sync is not configured in this build (missing Google client ID).');
++        }
++        // Fail fast when the fork client has no secret: Google rejects the
++        // code exchange with 400 `client_secret is missing.` even for
++        // Desktop clients, so opening the browser first would only waste a
++        // consent round-trip to land on an error page.
++        if (client.direct && !client.secret) {
++            const err = new Error(CALENDAR_NOT_CONFIGURED_COPY) as any;
++            err.code = CALENDAR_NOT_CONFIGURED;
++            throw err;
+         }
+ 
+         // PKCE: only this process knows the verifier, so a code intercepted on
+@@ -286,7 +419,13 @@ export class CalendarManager extends EventEmitter {
+                     respond({ kind: 'connected' });
+                     finish(() => resolve());
+                 } catch (err) {
+-                    respond({ kind: 'error', reason: 'Google didn’t accept the sign-in code. It may have expired.' });
++                    // Name the configuration problem honestly: a missing or
++                    // rejected client secret is a build/packaging issue, not
++                    // an expired code. Everything else keeps the retry copy.
++                    const reason = isCalendarNotConfigured(err)
++                        ? CALENDAR_NOT_CONFIGURED_COPY
++                        : 'Google didn’t accept the sign-in code. It may have expired.';
++                    respond({ kind: 'error', reason });
+                     finish(() => reject(err));
+                 }
+             });
+@@ -361,7 +500,20 @@ export class CalendarManager extends EventEmitter {
+     private async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string) {
+         const client = calendarOAuthClient();
+         try {
+-            const data = await postTokenEndpoint({
++            // Fork-owned client: exchange straight with Google via the
++            // pure PKCE helpers, sending the baked fork secret (Google
++            // requires it even for Desktop clients). Stock path below
++            // untouched.
++            const data = client.direct
++                // eslint-disable-next-line @typescript-eslint/no-var-requires
++                ? await require('./calendarPkce').exchangeCodeDirect(
++                    code,
++                    codeVerifier,
++                    client.id,
++                    redirectUri,
++                    client.secret || undefined
++                )
++                : await postTokenEndpoint({
+                 grant_type: 'authorization_code',
+                 code,
+                 code_verifier: codeVerifier,
+@@ -440,6 +592,28 @@ export class CalendarManager extends EventEmitter {
+         }
+ 
+         const client = calendarOAuthClient();
++        // Fork-owned client: refresh straight with Google via the pure
++        // PKCE helpers, sending the baked fork secret like the exchange.
++        // Resolved fresh each time so packaged-vs-dev configuration cannot
++        // go stale across restarts. Stock path below untouched.
++        if (client.direct && client.id) {
++            try {
++                // eslint-disable-next-line @typescript-eslint/no-var-requires
++                const { refreshTokenDirect } = require('./calendarPkce');
++                const data = await refreshTokenDirect(this.refreshToken, client.id, client.secret || undefined);
++                this.handleTokenResponse(data);
++            } catch (error: any) {
++                console.error('[CalendarManager] Token refresh failed:', error);
++                // Same dead-grant rule as the stock path: only a revoked /
++                // wrong-client grant ends the connection — a network failure
++                // keeps the tokens, or an offline laptop would lose its
++                // calendar on the next refresh.
++                if (error?.code && DEAD_GRANT_ERRORS.has(error.code)) {
++                    this.disconnect();
++                }
++            }
++            return;
++        }
+         try {
+             const data = await postTokenEndpoint({
+                 grant_type: 'refresh_token',
+diff --git a/electron/services/HardwareId.ts b/electron/services/HardwareId.ts
+new file mode 100644
+index 0000000..a233eb2
+--- /dev/null
++++ b/electron/services/HardwareId.ts
+@@ -0,0 +1,194 @@
++/**
++ * electron/services/HardwareId.ts
++ *
++ * Stable per-device hardware identifier with graceful degradation.
++ *
++ * WHY THIS EXISTS: `trial:start` and `license:get-hardware-id` used to depend
++ * solely on the private `premium/` submodule's LicenseManager. Open-source /
++ * fork builds ship WITHOUT that submodule (see electron/premium/featureGate.ts),
++ * so every HWID lookup fell through to the literal string `'unavailable'` —
++ * which was then POSTed to `/v1/trial/start` as the device binding and
++ * rejected (`invalid_hwid`), making the free trial unclaimable and showing a
++ * raw placeholder in the trial UI ("hardware_id_unavailable").
++ *
++ * Resolution order (first non-placeholder wins — keeps existing activated
++ * installs on the SAME id they bound with):
++ *   1. Rust native module `getHardwareId()` (SHA-256 hex of machine UID).
++ *   2. Premium LicenseManager `getHardwareId()` (when submodule present).
++ *   3. OS machine id, SHA-256 hexed (Linux /etc/machine-id, macOS
++ *      IOPlatformUUID, Windows MachineGuid; then hostname + MACs).
++ *   4. Persisted random install id (per-userData, stable across restarts),
++ *      SHA-256 hexed — last resort so the value is at least stable.
++ *
++ * The function NEVER returns a placeholder ('', 'unavailable',
++ * 'hardware_id_unavailable', 'unknown-device', 'unknown'). It throws only
++ * when nothing stable can be produced at all, so callers can surface a real
++ * error instead of sending garbage to the server.
++ */
++
++import * as crypto from "crypto";
++import * as fs from "fs";
++import * as os from "os";
++import * as path from "path";
++
++const PLACEHOLDERS = new Set([
++  "",
++  "unavailable",
++  "hardware_id_unavailable",
++  "unknown",
++  "unknown-device",
++]);
++
++export function isPlaceholderHardwareId(value: unknown): boolean {
++  if (typeof value !== "string") return true;
++  const v = value.trim().toLowerCase();
++  return v === "" || PLACEHOLDERS.has(v);
++}
++
++function sha256hex(input: string): string {
++  return crypto.createHash("sha256").update(input, "utf8").digest("hex");
++}
++
++function tryNativeModuleHardwareId(): string | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { loadNativeModule } = require("../audio/nativeModuleLoader");
++    const mod = loadNativeModule?.();
++    const hwid: unknown = mod?.getHardwareId?.();
++    if (typeof hwid === "string" && !isPlaceholderHardwareId(hwid)) return hwid.trim();
++  } catch {
++    /* native binary not built/loaded — fall through */
++  }
++  return null;
++}
++
++function tryPremiumHardwareId(): string | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { LicenseManager } = require("../../premium/electron/services/LicenseManager");
++    const hwid: unknown = LicenseManager.getInstance().getHardwareId();
++    if (typeof hwid === "string" && !isPlaceholderHardwareId(hwid)) return hwid.trim();
++  } catch {
++    /* premium submodule absent (open-source / fork build) — fall through */
++  }
++  return null;
++}
++
++function readFileTrimmed(filePath: string): string | null {
++  try {
++    const content = fs.readFileSync(filePath, "utf8").trim();
++    return content || null;
++  } catch {
++    return null;
++  }
++}
++
++function tryExecTrimmed(command: string): string | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { execSync } = require("child_process");
++    const out = execSync(command, {
++      encoding: "utf8",
++      stdio: ["ignore", "pipe", "ignore"],
++      timeout: 5000,
++    } as unknown as object);
++    const text = String(out ?? "").trim();
++    return text || null;
++  } catch {
++    return null;
++  }
++}
++
++/** Best-effort raw OS machine id (NOT hashed — hashing happens in the caller). */
++function readOsMachineId(): string | null {
++  const platform = process.platform;
++
++  if (platform === "linux") {
++    const id =
++      readFileTrimmed("/etc/machine-id") || readFileTrimmed("/var/lib/dbus/machine-id");
++    if (id && !isPlaceholderHardwareId(id)) return id;
++  }
++
++  if (platform === "darwin") {
++    const uuid = tryExecTrimmed(
++      "ioreg -rd1 -c IOPlatformExpertDevice | grep -E '\"IOPlatformUUID\"' | sed -E 's/.*\"IOPlatformUUID\" = \"([^\"]+)\".*/\\1/'"
++    );
++    if (uuid && !isPlaceholderHardwareId(uuid)) return uuid;
++  }
++
++  if (platform === "win32") {
++    const guid = tryExecTrimmed(
++      "reg query HKLM\\SOFTWARE\\Microsoft\\Cryptography /v MachineGuid"
++    );
++    const match = guid?.match(/MachineGuid\s+REG_SZ\s+(\S+)/i);
++    if (match?.[1] && !isPlaceholderHardwareId(match[1])) return match[1].trim();
++  }
++
++  // Portable fallback: hostname + stable MAC list. Not as strong as a machine
++  // GUID, but deterministic for a given machine (VM MAC churn aside).
++  try {
++    const interfaces = os.networkInterfaces();
++    const macs: string[] = [];
++    for (const addrs of Object.values(interfaces)) {
++      for (const addr of addrs ?? []) {
++        const mac = (addr.mac ?? "").toLowerCase();
++        if (mac && mac !== "00:00:00:00:00:00" && !macs.includes(mac)) macs.push(mac);
++      }
++    }
++    const seed = `${os.hostname()}|${macs.sort().join(",")}`;
++    if (os.hostname() || macs.length > 0) return seed;
++  } catch {
++    /* ignore */
++  }
++
++  return null;
++}
++
++function userDataDir(): string | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { app } = require("electron") as typeof import("electron");
++    return app.getPath("userData");
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Stable install-scoped id, persisted under userData so repeated calls (and
++ * restarts) return the same value even on machines where no OS id is
++ * readable (containers, kiosks). Only used as a last resort.
++ */
++function getOrCreateInstallId(): string {
++  const dir = userDataDir();
++  const fallbackSeed = `${os.hostname()}|${os.userInfo?.()?.username ?? "user"}`;
++  if (!dir) return `install:${fallbackSeed}:${process.platform}`;
++
++  const filePath = path.join(dir, "install-id");
++  const existing = readFileTrimmed(filePath);
++  if (existing && !isPlaceholderHardwareId(existing)) return existing;
++
++  const fresh = crypto.randomUUID();
++  try {
++    fs.mkdirSync(dir, { recursive: true });
++    fs.writeFileSync(filePath, `${fresh}\n`, { mode: 0o600 });
++  } catch {
++    /* non-fatal: still return the fresh id for this session */
++    return `install:${fresh}`;
++  }
++  return fresh;
++}
++
++export function getStableHardwareId(): string {
++  const fromNative = tryNativeModuleHardwareId();
++  if (fromNative) return fromNative;
++
++  const fromPremium = tryPremiumHardwareId();
++  if (fromPremium) return fromPremium;
++
++  const osId = readOsMachineId();
++  if (osId && !isPlaceholderHardwareId(osId)) return sha256hex(osId);
++
++  // Last resort — stable per install, never a placeholder.
++  return sha256hex(`natively-install:${getOrCreateInstallId()}`);
++}
+diff --git a/electron/services/__tests__/CalendarPkce.test.mjs b/electron/services/__tests__/CalendarPkce.test.mjs
+new file mode 100644
+index 0000000..d64fdae
+--- /dev/null
++++ b/electron/services/__tests__/CalendarPkce.test.mjs
+@@ -0,0 +1,77 @@
++// electron/services/__tests__/CalendarPkce.test.mjs
++//
++// Unit tests for the fork's direct Google OAuth PKCE helpers
++// (electron/services/calendarPkce.ts). Pure module (node:crypto only),
++// so it runs in plain node against the esbuild-transpiled output.
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import crypto from 'node:crypto';
++import path from 'node:path';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const { createPkcePair, exchangeCodeDirect, refreshTokenDirect } = await import(
++  pathToFileURL(path.resolve(__dirname, '../../../dist-electron/electron/services/calendarPkce.js')).href
++);
++
++const B64URL = /^[A-Za-z0-9_-]+$/;
++
++test('createPkcePair returns a verifier and matching S256 challenge', () => {
++  const { verifier, challenge } = createPkcePair();
++  // 64 random bytes -> 86 base64url chars (within RFC 7636 43..128).
++  assert.equal(typeof verifier, 'string');
++  assert.ok(verifier.length >= 43 && verifier.length <= 128, `verifier length ${verifier.length}`);
++  assert.match(verifier, B64URL);
++  // Challenge independently recomputed — must equal sha256(verifier).
++  const expected = crypto
++    .createHash('sha256')
++    .update(verifier, 'utf8')
++    .digest('base64')
++    .replace(/\+/g, '-')
++    .replace(/\//g, '_')
++    .replace(/=+$/, '');
++  assert.equal(challenge, expected);
++});
++
++test('createPkcePair is unique per call', () => {
++  const a = createPkcePair();
++  const b = createPkcePair();
++  assert.notEqual(a.verifier, b.verifier);
++  assert.notEqual(a.challenge, b.challenge);
++});
++
++test('exchangeCodeDirect sends client_secret only when configured', async () => {
++  let seen = '';
++  globalThis.fetch = async (_url, opts) => {
++    seen = String(opts.body);
++    return { ok: true, json: async () => ({}) };
++  };
++  try {
++    await exchangeCodeDirect('code', 'verifier', 'cid', 'http://127.0.0.1:1', 'shh-secret');
++    assert.match(seen, /client_secret=shh-secret/);
++    assert.match(seen, /code_verifier=verifier/);
++    await exchangeCodeDirect('code', 'verifier', 'cid', 'http://127.0.0.1:1');
++    assert.doesNotMatch(seen, /client_secret/);
++  } finally {
++    // @ts-ignore restore: no fetch stub outside this test
++    delete globalThis.fetch;
++  }
++});
++
++test('refreshTokenDirect sends client_secret only when configured', async () => {
++  let seen = '';
++  globalThis.fetch = async (_url, opts) => {
++    seen = String(opts.body);
++    return { ok: true, json: async () => ({}) };
++  };
++  try {
++    await refreshTokenDirect('rt', 'cid', 'shh-secret');
++    assert.match(seen, /client_secret=shh-secret/);
++    await refreshTokenDirect('rt', 'cid');
++    assert.doesNotMatch(seen, /client_secret/);
++  } finally {
++    // @ts-ignore restore: no fetch stub outside this test
++    delete globalThis.fetch;
++  }
++});
+diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
+new file mode 100644
+index 0000000..219fbc4
+--- /dev/null
++++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
+@@ -0,0 +1,113 @@
++// electron/services/__tests__/ForkPatch2Sources.test.mjs
++//
++// Source assertions for the second ForkHub patch (calendar direct auth,
++// version-check fallback, dual fund links, maintainer card). Follows the
++// repo's TrialIpcRedaction convention: read source text, assert the
++// contract — no Electron runtime needed.
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++// electron/services/__tests__ -> repo root
++const ROOT = path.resolve(__dirname, '..', '..', '..');
++const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
++
++test('calendar: direct PKCE branch coexists with the stock path', () => {
++  const src = read('electron/services/CalendarManager.ts');
++  // Fork channel resolution (baked id or explicit direct env).
++  assert.match(src, /readForkGoogleClientId/);
++  assert.match(src, /nativelyGoogleClientId/);
++  assert.match(src, /NATIVELY_CALENDAR_DIRECT/);
++  // PKCE wiring.
++  assert.match(src, /code_challenge/);
++  assert.match(src, /code_challenge_method/);
++  assert.match(src, /S256/);
++  assert.match(src, /exchangeCodeDirect/);
++  assert.match(src, /refreshTokenDirect/);
++  // Stock direct-with-upstream-client path preserved (upstream behavior
++  // when not direct): the committed client, its resolver, and the
++  // secret-gated token calls are intact. (Upstream v2.9.2 removed the
++  // natively-api proxy the reference patch was written against, so there
++  // are no /api/calendar/* call sites left to preserve — see report.)
++  assert.match(src, /DEFAULT_CALENDAR_CLIENT_ID/);
++  assert.match(src, /calendarOAuthClient/);
++  assert.match(src, /client_secret/);
++  // No silent misconfiguration: missing id refuses with a readable error.
++  assert.match(src, /missing Google client ID/);
++  // Catalog builds fall back to the maintainer's public Desktop client
++  // (gated so stock builds keep the stock client).
++  assert.match(src, /FORK_DEFAULT_CLIENT_ID/);
++  assert.match(src, /apps\.googleusercontent\.com/);
++  assert.match(src, /isForkCatalogBuild/);
++  assert.match(src, /UPSTREAM_OWNER/);
++  // Google requires client_secret even for Desktop clients: the fork
++  // secret ships baked (never committed) or via env, and is sent on the
++  // direct path; without it connect fails fast with a named error.
++  assert.match(src, /readForkGoogleClientSecret/);
++  assert.match(src, /nativelyGoogleClientSecret/);
++  assert.match(src, /NATIVELY_GOOGLE_CLIENT_SECRET/);
++  assert.match(src, /CALENDAR_NOT_CONFIGURED/);
++  assert.match(src, /isCalendarNotConfigured/);
++  assert.match(src, /set up for this build/);
++});
++
++test('calendar: PKCE helpers stay pure (no electron import)', () => {
++  const src = read('electron/services/calendarPkce.ts');
++  assert.doesNotMatch(src, /from ['"]electron['"]/);
++  assert.match(src, /createPkcePair/);
++  assert.match(src, /oauth2\.googleapis\.com\/token/);
++  // Secret is conditional, never unconditional: the key appears only in
++  // the provided-secret spread (Google requires it even for Desktop
++  // clients; absent configuration sends none).
++  assert.match(src, /clientSecret/);
++  assert.match(src, /client_secret: clientSecret/);
++});
++
++test('update-feed: bundle helpers exist for same-base rebuild ordering', () => {
++  const src = read('electron/update/updateFeed.ts');
++  assert.match(src, /parseBundleTag/);
++  assert.match(src, /isBundleCounterUpgrade/);
++  assert.match(src, /readBakedBundleN/);
++  assert.match(src, /forkhubBundleN/);
++});
++
++test('version check: updater failures fall back to the catalog compare', () => {
++  const src = read('electron/main.ts');
++  assert.match(src, /manualCheckFallbackPending/);
++  // Catch path runs the manual compare instead of broadcasting Error.
++  assert.match(src, /trying catalog compare/);
++  // Async 'error' events during a check are absorbed by the same fallback…
++  assert.match(src, /catalog fallback failed/);
++  // …while download-time errors still broadcast as before.
++  assert.match(src, /Include more details in the error message for debugging/);
++  // Manual compare always reaches a terminal state (never stuck Checking).
++  assert.match(src, /Could not reach the update feed/);
++  // ForkHub channel: every catalog tag is fh-channeled, so the updater
++  // must follow the fh channel (whose fh-linux.yml build.sh publishes) —
++  // channel='latest' matches nothing (ERR_UPDATER_NO_PUBLISHED_VERSIONS).
++  assert.match(src, /autoUpdater\.channel = 'fh'/);
++  // Same-base rebuilds order by bundle counter (version gates cannot
++  // order bundle `-fh<N>` tags against updater versions).
++  assert.match(src, /isBundleCounterUpgrade/);
++  assert.match(src, /readBakedBundleN/);
++});
++
++test('about: support opens original + fork sponsors, maintainer card present', () => {
++  const src = read('src/components/AboutSection.tsx');
++  assert.match(src, /buymeacoffee\.com\/evinjohnn/);
++  assert.match(src, /github\.com\/sponsors\/ImBIOS/);
++  assert.match(src, /Imamuzzaki Abu Salam/);
++  assert.match(src, /github\.com\/ImBIOS/);
++  assert.match(src, /Fork Maintainer/);
++});
++
++test('calendar button: connect failures surface instead of failing silently', () => {
++  const src = read('src/components/ui/ConnectCalendarButton.tsx');
++  assert.match(src, /setError/);
++  assert.match(src, /res\.error/);
++  assert.match(src, /Could not connect calendar/);
++});
+diff --git a/electron/services/__tests__/HardwareId.test.mjs b/electron/services/__tests__/HardwareId.test.mjs
+new file mode 100644
+index 0000000..893bb87
+--- /dev/null
++++ b/electron/services/__tests__/HardwareId.test.mjs
+@@ -0,0 +1,38 @@
++// electron/services/__tests__/HardwareId.test.mjs
++//
++// Regression test for the "hardware_id_unavailable" trial bug: open-source /
++// fork builds ship without the private `premium/` submodule, so HWID lookups
++// that depend solely on LicenseManager fell through to the literal string
++// 'unavailable' — which was POSTed to /v1/trial/start and rejected
++// (invalid_hwid), making the free trial unclaimable.
++//
++// getStableHardwareId() must NEVER return a placeholder: it walks
++// native module → premium LicenseManager → OS machine id → persisted
++// install id, and throws instead of returning garbage.
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const { getStableHardwareId, isPlaceholderHardwareId } = await import(
++  pathToFileURL(path.resolve(__dirname, '../../../dist-electron/electron/services/HardwareId.js')).href
++);
++
++test('isPlaceholderHardwareId rejects every known placeholder shape', () => {
++  for (const bad of ['', '  ', 'unavailable', 'UNAVAILABLE', 'hardware_id_unavailable', 'unknown', 'unknown-device', null, undefined, 123]) {
++    assert.equal(isPlaceholderHardwareId(bad), true, `expected placeholder: ${String(bad)}`);
++  }
++  assert.equal(isPlaceholderHardwareId('a'.repeat(64)), false);
++});
++
++test('getStableHardwareId returns a stable 64-hex id, never a placeholder', () => {
++  const first = getStableHardwareId();
++  assert.equal(typeof first, 'string');
++  assert.match(first, /^[0-9a-f]{64}$/, 'must be SHA-256 hex');
++  assert.equal(isPlaceholderHardwareId(first), false);
++
++  const second = getStableHardwareId();
++  assert.equal(second, first, 'must be stable across calls in one process');
++});
+diff --git a/electron/services/__tests__/LinuxDockAssociation.test.mjs b/electron/services/__tests__/LinuxDockAssociation.test.mjs
+new file mode 100644
+index 0000000..bab63fb
+--- /dev/null
++++ b/electron/services/__tests__/LinuxDockAssociation.test.mjs
+@@ -0,0 +1,60 @@
++// electron/services/__tests__/LinuxDockAssociation.test.mjs
++//
++// Source assertions for the Linux dock/pin fix (third ForkHub patch).
++// GNOME matches windows to .desktop files by WM_CLASS, which Electron
++// derives from the app name: package.json `name` ("natively") vs the
++// shipped StartupWMClass ("Natively") never matched, so the dock showed a
++// generic icon with no pin option. Follows the repo's TrialIpcRedaction
++// convention: read source text, assert the contract.
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const ROOT = path.resolve(__dirname, '..', '..', '..');
++const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
++
++test('main: linux pins userData before renaming, both gated to linux', () => {
++  const src = read('electron/main.ts');
++  const gate = src.indexOf("process.platform === 'linux'");
++  assert.ok(gate !== -1, 'linux gate present');
++  const pin = src.indexOf("app.setPath('userData'", gate);
++  const rename = src.indexOf("app.setName('Natively')", gate);
++  assert.ok(pin !== -1 && rename !== -1, 'pin + rename present');
++  assert.ok(pin < rename, 'userData pinned BEFORE setName (no profile move)');
++  // Existing installs live under lowercase dir; a capitalized profile is
++  // respected, never orphaned.
++  assert.match(src, /'natively'/);
++  assert.match(src, /Natively/);
++  // macOS/Windows sequencing untouched (their dock behavior is load-bearing).
++  assert.match(src, /macOS\/Windows sequencing is untouched/);
++});
++
++test('build config declares the WM_CLASS contract + deb hook', () => {
++  const pkg = JSON.parse(read('package.json'));
++  assert.equal(pkg.build.linux.desktop.entry.StartupWMClass, 'Natively');
++  const hook = pkg.build.deb.afterInstall;
++  assert.ok(hook, 'deb.afterInstall set');
++  const hookPath = path.join(ROOT, hook.replace(/^\.\//, ''));
++  assert.ok(fs.existsSync(hookPath), `hook script exists at ${hook}`);
++  const script = fs.readFileSync(hookPath, 'utf8');
++  assert.match(script, /update-desktop-database/);
++  assert.match(script, /gtk-update-icon-cache/);
++  assert.match(script, /exit 0/);
++  // Every refresh is best-effort: a missing tool must never fail installs.
++  const guarded = (script.match(/\|\| true/g) || []).length;
++  assert.ok(guarded >= 2, 'cache refreshes guarded');
++  // No session-process meddling from postinst (wrong context as root).
++  assert.doesNotMatch(script, /xfce4-panel|killall|pkill|systemctl --user/);
++});
++
++test('disguise renaming still owns stealth modes (normal-mode fix only)', () => {
++  const src = read('electron/main.ts');
++  // The early Linux setName covers startup association; per-mode renames
++  // (Terminal/Settings/Activity) still apply later for stealth.
++  assert.match(src, /applyInitialDisguise/);
++  assert.match(src, /_applyDisguise/);
++});
+diff --git a/electron/services/calendarPkce.ts b/electron/services/calendarPkce.ts
+new file mode 100644
+index 0000000..99df124
+--- /dev/null
++++ b/electron/services/calendarPkce.ts
+@@ -0,0 +1,118 @@
++/**
++ * electron/services/calendarPkce.ts
++ *
++ * Pure PKCE helpers for Google OAuth (no electron imports — unit-testable
++ * in plain node).
++ *
++ * WHY: the stock flow exchanges the auth code through the natively-api
++ * proxy, which holds the secret for UPSTREAM's OAuth client. A fork build
++ * can never use that proxy with its own client id (Google binds the code
++ * to the initiating client). The fork therefore exchanges and refreshes
++ * tokens DIRECTLY with Google — sending the fork OAuth client's own
++ * secret, which Google requires at the token endpoint even for Desktop
++ * clients with PKCE (without it Google answers 400 `invalid_request:
++ * client_secret is missing.`). Per Google's own native-app docs the
++ * secret is not treated as confidential here: it ships baked into the
++ * packaged app (see CalendarManager secret resolution + build.sh), never
++ * committed to source. See CalendarManager for the wiring.
++ */
++
++import * as crypto from "crypto";
++
++const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
++
++export interface PkcePair {
++  /** High-entropy secret kept in memory for this flow only. */
++  verifier: string;
++  /** S256 challenge sent in the auth URL. */
++  challenge: string;
++}
++
++function base64UrlEncode(buf: Buffer): string {
++  return buf
++    .toString("base64")
++    .replace(/\+/g, "-")
++    .replace(/\//g, "_")
++    .replace(/=+$/, "");
++}
++
++/** Fresh verifier (86 chars) + its S256 challenge. */
++export function createPkcePair(): PkcePair {
++  const verifier = base64UrlEncode(crypto.randomBytes(64));
++  const challenge = base64UrlEncode(
++    crypto.createHash("sha256").update(verifier, "utf8").digest()
++  );
++  return { verifier, challenge };
++}
++
++async function postTokenRequest(
++  body: Record<string, string>,
++  signal?: AbortSignal
++): Promise<any> {
++  const response = await fetch(GOOGLE_TOKEN_URL, {
++    method: "POST",
++    headers: { "Content-Type": "application/x-www-form-urlencoded" },
++    body: new URLSearchParams(body).toString(),
++    signal,
++  });
++  if (!response.ok) {
++    const errBody = await response.json().catch(() => ({} as any));
++    const detail =
++      (errBody as any)?.error_description || (errBody as any)?.error || "";
++    const err = new Error(
++      `google_token_failed status=${response.status}${detail ? ` ${detail}` : ""}`.trim()
++    );
++    // Carry Google's machine-readable code so callers can apply the same
++    // dead-grant rule as the stock refresh path.
++    (err as any).code = (errBody as any)?.error || "token_request_failed";
++    throw err;
++  }
++  return response.json();
++}
++
++/**
++ * Direct code→token exchange. `clientSecret` is sent when provided: Google
++ * requires it at the token endpoint even for Desktop clients using PKCE
++ * (absent → 400 `invalid_request: client_secret is missing.`). Omitted
++ * only when the caller has no secret to send.
++ */
++export function exchangeCodeDirect(
++  code: string,
++  verifier: string,
++  clientId: string,
++  redirectUri: string,
++  clientSecret?: string,
++  signal?: AbortSignal
++): Promise<any> {
++  return postTokenRequest(
++    {
++      code,
++      client_id: clientId,
++      redirect_uri: redirectUri,
++      grant_type: "authorization_code",
++      code_verifier: verifier,
++      ...(clientSecret ? { client_secret: clientSecret } : {}),
++    },
++    signal
++  );
++}
++
++/**
++ * Direct refresh-token grant. Same secret rule as the exchange above.
++ */
++export function refreshTokenDirect(
++  refreshToken: string,
++  clientId: string,
++  clientSecret?: string,
++  signal?: AbortSignal
++): Promise<any> {
++  return postTokenRequest(
++    {
++      refresh_token: refreshToken,
++      client_id: clientId,
++      grant_type: "refresh_token",
++      ...(clientSecret ? { client_secret: clientSecret } : {}),
++    },
++    signal
++  );
++}
+diff --git a/electron/services/resolveCompanySearchProvider.ts b/electron/services/resolveCompanySearchProvider.ts
+index d2f30ce..39afdd3 100644
+--- a/electron/services/resolveCompanySearchProvider.ts
++++ b/electron/services/resolveCompanySearchProvider.ts
+@@ -15,22 +15,35 @@ export function resolveCompanySearchProvider(): SearchProvider | null {
+ 
+   const tavilyApiKey = cm.getTavilyApiKey();
+   if (tavilyApiKey) {
+-    const {
+-      TavilySearchProvider,
+-    } = require('../../premium/electron/knowledge/TavilySearchProvider');
+-    return new TavilySearchProvider(tavilyApiKey);
++    // Wrapped in try/catch (not just a branch) for two reasons: open-source
++    // / fork builds ship without premium/, in which case fall through to
++    // the Natively proxy cascade instead of crashing the caller — and
++    // esbuild leaves try-wrapped requires unbundeled, so `build:electron`
++    // succeeds without the submodule (see featureGate.ts).
++    try {
++      const {
++        TavilySearchProvider,
++      } = require('../../premium/electron/knowledge/TavilySearchProvider');
++      return new TavilySearchProvider(tavilyApiKey);
++    } catch {
++      console.warn('[CompanySearch] Tavily provider unavailable (premium module missing); falling through');
++    }
+   }
+ 
+   const nativelyKey = cm.getNativelyApiKey();
+   if (nativelyKey) {
+-    const {
+-      NativelySearchProvider,
+-    } = require('../../premium/electron/knowledge/NativelySearchProvider');
+-    // Pass the real trial token when the key is the __trial__ sentinel so the
+-    // server can authenticate via x-trial-token instead of the invalid key.
+-    const trialToken = nativelyKey === TRIAL_SENTINEL_KEY ? cm.getTrialToken() : undefined;
+-    console.log('[CompanySearch] Using Natively API search (no Tavily key configured)');
+-    return new NativelySearchProvider(nativelyKey, trialToken ?? undefined);
++    try {
++      const {
++        NativelySearchProvider,
++      } = require('../../premium/electron/knowledge/NativelySearchProvider');
++      // Pass the real trial token when the key is the __trial__ sentinel so the
++      // server can authenticate via x-trial-token instead of the invalid key.
++      const trialToken = nativelyKey === TRIAL_SENTINEL_KEY ? cm.getTrialToken() : undefined;
++      console.log('[CompanySearch] Using Natively API search (no Tavily key configured)');
++      return new NativelySearchProvider(nativelyKey, trialToken ?? undefined);
++    } catch {
++      console.warn('[CompanySearch] Natively search provider unavailable (premium module missing)');
++    }
+   }
+ 
+   return null;
+diff --git a/electron/update/ReleaseNotesManager.test.mjs b/electron/update/ReleaseNotesManager.test.mjs
+index 14cabf3..9f9b820 100644
+--- a/electron/update/ReleaseNotesManager.test.mjs
++++ b/electron/update/ReleaseNotesManager.test.mjs
+@@ -34,15 +34,17 @@ test('release notes parser accepts GitHub H3 headings and emoji-decorated titles
+   ]);
+ });
+ 
+-test('release notes manager points at the published GitHub repository', () => {
++test('release notes manager points at the ForkHub catalog, not upstream', () => {
+   const manager = ReleaseNotesManager.getInstance();
+-  assert.equal(manager.repoOwner, 'Natively-AI-assistant');
+-  assert.equal(manager.repoName, 'natively-cluely-ai-assistant');
++  assert.equal(manager.repoOwner, process.env.NATIVELY_UPDATE_OWNER || 'with-fh');
++  assert.equal(manager.repoName, process.env.NATIVELY_UPDATE_REPO || '.forkhub');
+ });
+ 
+ test('release notes lookup tries both tag spellings (V2.8.8 is published with a capital V)', () => {
+   const manager = ReleaseNotesManager.getInstance();
+-  const base = 'https://api.github.com/repos/Natively-AI-assistant/natively-cluely-ai-assistant/releases';
++  const owner = process.env.NATIVELY_UPDATE_OWNER || 'with-fh';
++  const repo = process.env.NATIVELY_UPDATE_REPO || '.forkhub';
++  const base = `https://api.github.com/repos/${owner}/${repo}/releases`;
+   for (const version of ['2.8.8', 'v2.8.8', 'V2.8.8']) {
+     assert.deepEqual(manager.buildReleaseUrls(version), [`${base}/tags/v2.8.8`, `${base}/tags/V2.8.8`]);
+   }
+diff --git a/electron/update/ReleaseNotesManager.ts b/electron/update/ReleaseNotesManager.ts
+index af913be..44bd2f9 100644
+--- a/electron/update/ReleaseNotesManager.ts
++++ b/electron/update/ReleaseNotesManager.ts
+@@ -1,5 +1,10 @@
+ 
+ import { net } from "electron";
++import {
++  UPDATE_CATALOG_TAG_PREFIX,
++  apiReleasesListUrl,
++  getUpdateFeed,
++} from "./updateFeed";
+ 
+ const RELEASE_NOTE_BULLET_SECTIONS = new Set(["What's New", "Improvements", "Fixes", "Technical"]);
+ const GITHUB_REQUEST_TIMEOUT_MS = 10000;
+@@ -20,8 +25,11 @@ export interface ParsedReleaseNotes {
+ export class ReleaseNotesManager {
+     private static instance: ReleaseNotesManager;
+     private cachedNotes: ParsedReleaseNotes | null = null;
+-    private readonly repoOwner = "Natively-AI-assistant";
+-    private readonly repoName = "natively-cluely-ai-assistant";
++    // Feed-backed (see electron/update/updateFeed.ts): fork builds follow the
++    // ForkHub catalog, not the upstream author's repo. Kept as public
++    // readonly so existing tests/consumers keep compiling.
++    public readonly repoOwner = getUpdateFeed().owner;
++    public readonly repoName = getUpdateFeed().repo;
+ 
+     private constructor() { }
+ 
+@@ -41,25 +49,24 @@ export class ReleaseNotesManager {
+         console.log(`[ReleaseNotesManager] Fetching release notes for ${version}...`);
+ 
+         try {
+-            // Tags are published as both "v2.8.8" and "V2.8.8", and the tags
+-            // endpoint is case-sensitive: try each spelling until one exists.
+-            let response: string | null = null;
+-            for (const url of this.buildReleaseUrls(version)) {
+-                response = await this.makeRequest(url);
+-                if (response) break;
++            if (version === 'latest') {
++                const latest = await this.fetchLatestCatalogRelease();
++                if (!latest) {
++                    console.warn("[ReleaseNotesManager] Failed to fetch latest catalog release.");
++                    return null;
++                }
++                const parsed = this.parseReleaseNotes(latest.body, latest.tag, latest.htmlUrl);
++                this.cachedNotes = parsed;
++                return parsed;
+             }
+ 
+-            if (!response) {
++            const release = await this.fetchReleaseByVersion(version);
++            if (!release) {
+                 console.warn("[ReleaseNotesManager] Failed to fetch release notes from API.");
+                 return null;
+             }
+ 
+-            const data = JSON.parse(response);
+-            const body = data.body || "";
+-            const htmlUrl = data.html_url || "";
+-            const tagName = data.tag_name || version; // Use tag_name from API if available
+-
+-            const parsed = this.parseReleaseNotes(body, tagName, htmlUrl);
++            const parsed = this.parseReleaseNotes(release.body, release.tag, release.htmlUrl);
+             this.cachedNotes = parsed;
+             return parsed;
+ 
+@@ -69,6 +76,86 @@ export class ReleaseNotesManager {
+         }
+     }
+ 
++    /**
++     * Newest non-draft catalog release for THIS target (tags are namespaced
++     * per target inside the shared `.forkhub` catalog — see updateFeed.ts).
++     * NOTE: intentionally NOT `/releases/latest` — in a shared per-owner
++     * catalog "latest" is whatever target released most recently.
++     */
++    private async fetchLatestCatalogRelease(): Promise<{ body: string; htmlUrl: string; tag: string } | null> {
++        const listUrl = apiReleasesListUrl();
++        const response = await this.makeRequest(listUrl);
++        if (!response) return null;
++
++        try {
++            const releases = JSON.parse(response);
++            if (!Array.isArray(releases)) return null;
++            const match = releases.find(
++                (r: any) =>
++                    !r?.draft &&
++                    typeof r?.tag_name === "string" &&
++                    r.tag_name.startsWith(UPDATE_CATALOG_TAG_PREFIX)
++            );
++            if (!match) {
++                console.warn("[ReleaseNotesManager] No Natively release found in catalog");
++                return null;
++            }
++            return {
++                body: match.body || "",
++                htmlUrl: match.html_url || "",
++                tag: match.tag_name,
++            };
++        } catch (error) {
++            console.error("[ReleaseNotesManager] Error parsing catalog release list:", error);
++            return null;
++        }
++    }
++
++    /**
++     * Release body for an exact app version. Tries the direct tag lookups
++     * first (both `v`/`V` spellings — the tags endpoint is case-sensitive),
++     * then falls back to a catalog-list search on the numeric base version:
++     * the updater reports versions like `2.8.1-fh.imbios.1` while catalog
++     * tags are namespaced (`...--v2.8.1-fh1`).
++     */
++    private async fetchReleaseByVersion(version: string): Promise<{ body: string; htmlUrl: string; tag: string } | null> {
++        for (const url of this.buildReleaseUrls(version)) {
++            const response = await this.makeRequest(url);
++            if (response) {
++                try {
++                    const data = JSON.parse(response);
++                    return { body: data.body || "", htmlUrl: data.html_url || "", tag: data.tag_name || version };
++                } catch {
++                    /* malformed body — try next candidate */
++                }
++            }
++        }
++
++        // Suffix-tolerant fallback: `2.8.1-fh.imbios.1` → tag containing `2.8.1`.
++        const base = version.trim().replace(/^v/i, '').split('-')[0];
++        const listResponse = await this.makeRequest(apiReleasesListUrl());
++        if (listResponse) {
++            try {
++                const releases = JSON.parse(listResponse);
++                if (Array.isArray(releases)) {
++                    const match = releases.find(
++                        (r: any) =>
++                            !r?.draft &&
++                            typeof r?.tag_name === "string" &&
++                            r.tag_name.startsWith(UPDATE_CATALOG_TAG_PREFIX) &&
++                            r.tag_name.includes(base)
++                    );
++                    if (match) {
++                        return { body: match.body || "", htmlUrl: match.html_url || "", tag: match.tag_name };
++                    }
++                }
++            } catch {
++                /* fall through to null */
++            }
++        }
++        return null;
++    }
++
+     private buildReleaseUrls(version: string): string[] {
+         const base = `https://api.github.com/repos/${this.repoOwner}/${this.repoName}/releases`;
+         if (version === 'latest') return [`${base}/latest`];
+diff --git a/electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs b/electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs
+index 210fd47..f099efa 100644
+--- a/electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs
++++ b/electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs
+@@ -35,7 +35,10 @@ test('F-707: allowDowngrade is restored after the channel setter clobbers it', (
+     // If a future electron-updater stops doing this the guard is harmless.
+     return;
+   }
+-  const i = main.indexOf("autoUpdater.channel = 'latest'");
++  // Fork: the shared catalog is fh-channeled, so setupAutoUpdater follows
++  // channel='fh' (channel='latest' matches nothing). The clobber/restore
++  // invariant is identical either way.
++  const i = main.indexOf("autoUpdater.channel = 'fh'");
+   assert.notEqual(i, -1);
+   assert.ok(/autoUpdater\.allowDowngrade\s*=\s*false/.test(main.slice(i, i + 900)),
+     'setting channel enables downgrades; restore the default explicitly after it (F-707)');
+diff --git a/electron/update/updateFeed.test.mjs b/electron/update/updateFeed.test.mjs
+new file mode 100644
+index 0000000..f19298e
+--- /dev/null
++++ b/electron/update/updateFeed.test.mjs
+@@ -0,0 +1,74 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const { getUpdateFeed, extractVersionFromTag, apiReleaseUrl, latestReleasePageUrl, isForkCounterUpgrade, parseBundleTag, isBundleCounterUpgrade } = await import(
++  pathToFileURL(path.resolve(__dirname, '../../dist-electron/electron/update/updateFeed.js')).href
++);
++
++test('update feed defaults to the ForkHub catalog (env-overridable)', () => {
++  const feed = getUpdateFeed();
++  assert.equal(feed.owner, process.env.NATIVELY_UPDATE_OWNER || 'with-fh');
++  assert.equal(feed.repo, process.env.NATIVELY_UPDATE_REPO || '.forkhub');
++  assert.match(
++    latestReleasePageUrl(feed),
++    /^https:\/\/github\.com\/.+\/.+\/releases\/latest$/
++  );
++});
++
++test('extractVersionFromTag handles plain, suffixed, and catalog-namespaced tags', () => {
++  assert.equal(extractVersionFromTag('v2.8.1'), '2.8.1');
++  assert.equal(extractVersionFromTag('2.8.1'), '2.8.1');
++  assert.equal(extractVersionFromTag('2.8.1-fh.imbios.1'), '2.8.1-fh.imbios.1');
++  assert.equal(
++    extractVersionFromTag('natively-ai-assistant-natively-cluely-ai-assistant--v2.8.1-fh1'),
++    '2.8.1-fh1'
++  );
++  assert.equal(
++    extractVersionFromTag('natively-ai-assistant-natively-cluely-ai-assistant--V2.8.8-fh1'),
++    '2.8.8-fh1'
++  );
++  assert.equal(extractVersionFromTag('V2.8.8'), '2.8.8');
++});
++
++test("apiReleaseUrl refuses 'latest' (ambiguous in a shared catalog)", () => {
++  assert.throws(() => apiReleaseUrl('latest'), /ambiguous in a shared catalog/);
++  assert.match(apiReleaseUrl('v2.8.1'), /releases\/tags\/v2\.8\.1$/);
++});
++
++test('isForkCounterUpgrade orders same-owner rebuilds only', () => {  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.1', '2.8.1-fh.imbios.2'), true);
++  assert.equal(isForkCounterUpgrade('2.8.1-fh.with-fh.1', '2.8.1-fh.with-fh.2'), true);
++  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.2', '2.8.1-fh.imbios.2'), false);
++  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.2', '2.8.1-fh.imbios.1'), false);
++  // stock↔fork and cross-owner pairs never upgrade
++  assert.equal(isForkCounterUpgrade('2.8.1', '2.8.1-fh.imbios.1'), false);
++  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.1', '2.8.1'), false);
++  assert.equal(isForkCounterUpgrade('2.8.1-fh.imbios.1', '2.8.1-fh.someone.9'), false);
++  assert.equal(isForkCounterUpgrade('2.8.1', '2.8.2'), false);
++});
++
++test('parseBundleTag parses bundle tags, rejects the rest', () => {
++  assert.deepEqual(parseBundleTag('natively-ai-assistant-natively-cluely-ai-assistant--v2.9.2-fh6'), { base: '2.9.2', n: 6 });
++  assert.deepEqual(parseBundleTag('natively-ai-assistant-natively-cluely-ai-assistant--V2.9.2-fh1'), { base: '2.9.2', n: 1 });
++  assert.equal(parseBundleTag('v2.9.2-fh.with-fh.3'), null);
++  assert.equal(parseBundleTag('v2.9.2'), null);
++  assert.equal(parseBundleTag('garbage'), null);
++});
++
++test('isBundleCounterUpgrade orders same-base bundles by counter only', () => {
++  const B = 'natively-ai-assistant-natively-cluely-ai-assistant--v2.9.2-fh6';
++  // installed bundle 2, latest bundle 6 → newer
++  assert.equal(isBundleCounterUpgrade(2, B, '2.9.2-fh.with-fh.2'), true);
++  // equal / older counters → not newer
++  assert.equal(isBundleCounterUpgrade(6, B, '2.9.2-fh.with-fh.2'), false);
++  assert.equal(isBundleCounterUpgrade(9, B, '2.9.2-fh.with-fh.2'), false);
++  // unknown installed counter (pre-stamp builds, dev) → fall through (false)
++  assert.equal(isBundleCounterUpgrade(null, B, '2.9.2-fh.with-fh.2'), false);
++  assert.equal(isBundleCounterUpgrade(undefined, B, '2.9.2-fh.with-fh.2'), false);
++  // different base → not this rule's business
++  assert.equal(isBundleCounterUpgrade(2, B, '2.9.3-fh.with-fh.1'), false);
++  // non-bundle tag → not this rule's business
++  assert.equal(isBundleCounterUpgrade(2, 'v2.9.2-fh.with-fh.3', '2.9.2-fh.with-fh.2'), false);
++});
+diff --git a/electron/update/updateFeed.ts b/electron/update/updateFeed.ts
+new file mode 100644
+index 0000000..f2e9b71
+--- /dev/null
++++ b/electron/update/updateFeed.ts
+@@ -0,0 +1,396 @@
++/**
++ * electron/update/updateFeed.ts
++ *
++ * Single source of truth for where Natively checks for, downloads, and
++ * documents updates from.
++ *
++ * Fork builds (ForkHub) do NOT poll the upstream author's releases — they
++ * follow the ForkHub catalog (GitHub Releases of the `.forkhub` intent
++ * repository, currently `with-fh/.forkhub`), so a patched install is never
++ * offered (or silently handed) a stock build, and stock installs never see
++ * fork builds.
++ *
++ * Overrides (build-time or runtime env — runtime env only applies when the
++ * process is launched with it, e.g. dev; packaged GUI launches typically
++ * carry no env, so the baked defaults below are authoritative for ships):
++ *   NATIVELY_UPDATE_OWNER  (default "with-fh")
++ *   NATIVELY_UPDATE_REPO   (default ".forkhub")
++ *
++ * Catalog conventions (must hold for in-app updates to resolve):
++ *   - Installer releases in the catalog carry electron-updater manifests
++ *     (`latest.yml` / `latest-mac.yml` / `latest-linux.yml`, generated with
++ *     `generateUpdatesFilesForAllChannels`) — plain patched-source tarballs
++ *     are invisible to the updater.
++ *   - Catalog tags are namespaced per target:
++ *     `natively-ai-assistant-natively-cluely-ai-assistant--<version>`
++ *     so the shared per-owner catalog can host many targets.
++ *   - Built app versions carry a fork suffix (`<upstream>-fh.<owner>.<n>`,
++ *     e.g. `2.8.1-fh.imbios.1`) so fork builds compare newer than the
++ *     upstream they were derived from. The updater therefore runs with
++ *     `allowPrerelease = true` on this feed (see main.ts setupAutoUpdater).
++ */
++
++// NOTE: `process.env` is undefined in the Vite renderer — this module is
++// main-process only. Renderer UI that needs feed URLs must go through the
++// `get-update-feed` IPC (see ipcHandlers.ts + preload.ts).
++const envOwner =
++  typeof process !== "undefined" ? process.env?.NATIVELY_UPDATE_OWNER : undefined;
++const envRepo =
++  typeof process !== "undefined" ? process.env?.NATIVELY_UPDATE_REPO : undefined;
++
++export const UPDATE_FEED_OWNER = envOwner || "with-fh";
++export const UPDATE_FEED_REPO = envRepo || ".forkhub";
++
++/**
++ * ForkHub publisher override (the "which account's catalog do I update
++ * from" input in Settings → Version).
++ *
++ * Resolution order for the effective feed owner:
++ *   1. persisted override (`forkhub-updater.json` in userData — written by
++ *      the `set-update-feed-owner` IPC after catalog validation),
++ *   2. `NATIVELY_UPDATE_OWNER` env (dev / build-time),
++ *   3. baked default (`with-fh`).
++ *
++ * Stock installs never see fork builds and vice versa even when the user
++ * types another owner: validation (`checkPublisherCatalog`) only accepts
++ * accounts whose public `.forkhub` catalog has published releases, and the
++ * updater keeps `allowPrerelease` + the `fh` channel + the fork-counter
++ * gates, so a foreign feed that carries no `-fh.<owner>.<n>` builds for
++ * this install can never resolve into an "upgrade".
++ */
++
++/** GitHub account login shape (also covers orgs): 1–39 chars. */
++export function normalizeUpdateOwner(input: unknown): string | null {
++  if (typeof input !== "string") return null;
++  const v = input.trim().toLowerCase();
++  if (/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(v)) return v;
++  return null;
++}
++
++function persistedOwnerPath(): string | null {
++  try {
++    // Lazy electron require keeps this module importable in plain node
++    // (see tests) — same pattern as readBakedBundleN below.
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { app } = require("electron") as typeof import("electron");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const pathMod = require("path") as typeof import("path");
++    return pathMod.join(app.getPath("userData"), "forkhub-updater.json");
++  } catch {
++    return null;
++  }
++}
++
++/** Persisted publisher override, or null when unset/invalid/unreadable. */
++export function readPersistedUpdateOwner(): string | null {
++  try {
++    const p = persistedOwnerPath();
++    if (!p) return null;
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const fsMod = require("fs") as typeof import("fs");
++    const raw = JSON.parse(fsMod.readFileSync(p, "utf8"));
++    return normalizeUpdateOwner(raw?.owner);
++  } catch {
++    return null;
++  }
++}
++
++/** Persist a validated publisher override. Throws on invalid input. */
++export function writePersistedUpdateOwner(owner: string): void {
++  const norm = normalizeUpdateOwner(owner);
++  if (!norm) throw new Error(`Invalid GitHub owner: ${owner}`);
++  const p = persistedOwnerPath();
++  if (!p) throw new Error("userData unavailable — cannot persist update publisher");
++  // eslint-disable-next-line @typescript-eslint/no-var-requires
++  require("fs").writeFileSync(p, JSON.stringify({ owner: norm }, null, 2));
++}
++
++/** Tag namespace for Natively installer releases inside the shared catalog. */
++export const UPDATE_CATALOG_TAG_PREFIX =
++  "natively-ai-assistant-natively-cluely-ai-assistant--";
++
++/** Upstream feed — used only to decide whether legacy direct-asset URLs apply. */
++export const UPSTREAM_OWNER = "Natively-AI-assistant";
++export const UPSTREAM_REPO = "natively-cluely-ai-assistant";
++
++export interface UpdateFeed {
++  owner: string;
++  repo: string;
++}
++
++export function getUpdateFeed(): UpdateFeed {
++  const persisted = readPersistedUpdateOwner();
++  const owner = persisted ?? UPDATE_FEED_OWNER;
++  return { owner, repo: UPDATE_FEED_REPO };
++}
++
++/**
++ * Catalog validation for a publisher candidate (T3 parity: releases, not
++ * just the account). Accepts only when the public `{owner}/.forkhub`
++ * catalog carries at least one published, non-draft release. Private
++ * catalogs are unsupported — the check is unauthenticated, so only
++ * discoverable public releases count.
++ */
++export interface PublisherCatalogCheck {
++  ok: boolean;
++  owner: string;
++  repo: string;
++  /** Counted usable (published, non-draft) releases. */
++  releases: number;
++  message: string;
++}
++
++export function summarizePublisherReleases(releases: unknown): number {
++  if (!Array.isArray(releases)) return 0;
++  let n = 0;
++  for (const r of releases) {
++    if (r && typeof r === "object" && (r as any).draft !== true) n++;
++  }
++  return n;
++}
++
++export async function checkPublisherCatalog(
++  owner: string,
++  fetchImpl?: typeof fetch
++): Promise<PublisherCatalogCheck> {
++  const norm = normalizeUpdateOwner(owner);
++  const repo = UPDATE_FEED_REPO;
++  if (!norm) {
++    return {
++      ok: false,
++      owner: String(owner ?? "").trim(),
++      repo,
++      releases: 0,
++      message: "Enter a GitHub username or org (1–39 chars: letters, numbers, hyphens).",
++    };
++  }
++  const url = `https://api.github.com/repos/${norm}/${repo}/releases?per_page=100`;
++  let response: Response;
++  try {
++    const run =
++      fetchImpl ??
++      ((u: string) =>
++        fetch(u, {
++          headers: {
++            Accept: "application/vnd.github+json",
++            "User-Agent": "natively-forkhub-updater",
++          },
++        }));
++    response = await run(url);
++  } catch {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: "Could not reach github.com — check your connection and try again.",
++    };
++  }
++  if (response.status === 404) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: `No public ${repo} repo for '${norm}' — publish a ForkHub catalog first.`,
++    };
++  }
++  if (response.status === 403) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: "GitHub rate-limited the check — wait a minute and try again.",
++    };
++  }
++  if (!response.ok) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: `GitHub lookup failed (HTTP ${response.status}) — try again.`,
++    };
++  }
++  const releases = await response.json().catch(() => null);
++  const usable = summarizePublisherReleases(releases);
++  if (usable === 0) {
++    return {
++      ok: false,
++      owner: norm,
++      repo,
++      releases: 0,
++      message: `'${norm}/${repo}' has no published releases yet — nothing to update from.`,
++    };
++  }
++  return {
++    ok: true,
++    owner: norm,
++    repo,
++    releases: usable,
++    message: `Updating from ${norm}/${repo} releases.`,
++  };
++}
++
++/**
++ * Runtime twin of the feed block in main.ts setupAutoUpdater (which the
++ * F-707 source test pins — do not refactor that block; keep this in sync):
++ * follow the `fh` channel on the given feed with prereleases allowed and
++ * the library-side downgrade filter restored. `updater` is duck-typed so
++ * this module stays importable in plain node.
++ */
++export function applyForkFeed(
++  updater: {
++    setFeedURL: (opts: { provider: string; owner: string; repo: string }) => void;
++    channel: string;
++    allowDowngrade: boolean;
++    allowPrerelease: boolean;
++  },
++  feed: UpdateFeed
++): void {
++  updater.channel = "fh";
++  updater.allowDowngrade = false;
++  updater.setFeedURL({ provider: "github", owner: feed.owner, repo: feed.repo });
++  updater.allowPrerelease = true;
++}
++
++export function isUpstreamFeed(feed?: UpdateFeed): boolean {
++  const f = feed ?? getUpdateFeed();
++  return f.owner === UPSTREAM_OWNER && f.repo === UPSTREAM_REPO;
++}
++
++export function latestReleasePageUrl(feed?: UpdateFeed): string {
++  const f = feed ?? getUpdateFeed();
++  return `https://github.com/${f.owner}/${f.repo}/releases/latest`;
++}
++
++export function catalogReleaseTagUrl(tag: string, feed?: UpdateFeed): string {
++  const f = feed ?? getUpdateFeed();
++  return `https://github.com/${f.owner}/${f.repo}/releases/tag/${tag}`;
++}
++
++export function apiReleaseUrl(tagOrLatest: string, feed?: UpdateFeed): string {
++  const f = feed ?? getUpdateFeed();
++  if (tagOrLatest === "latest") {
++    // NOTE: intentionally NOT `/releases/latest` — in a shared per-owner
++    // catalog "latest" is whatever target released most recently. Callers
++    // that need the newest *Natively* release must list + filter by
++    // UPDATE_CATALOG_TAG_PREFIX (see ReleaseNotesManager).
++    throw new Error(
++      "apiReleaseUrl('latest') is ambiguous in a shared catalog — list releases and filter by UPDATE_CATALOG_TAG_PREFIX instead"
++    );
++  }
++  const tag = tagOrLatest.startsWith("v") ? tagOrLatest : `v${tagOrLatest}`;
++  return `https://api.github.com/repos/${f.owner}/${f.repo}/releases/tags/${tag}`;
++}
++
++export function apiReleasesListUrl(feed?: UpdateFeed): string {
++  const f = feed ?? getUpdateFeed();
++  return `https://api.github.com/repos/${f.owner}/${f.repo}/releases?per_page=30`;
++}
++
++/**
++ * Extracts the comparable version from a release tag.
++ *   "v2.8.1"            → "2.8.1"
++ *   "2.8.1-fh.imbios.1" → "2.8.1-fh.imbios.1"
++ *   "<slug>--v2.8.1-fh1" → "2.8.1-fh1"   (ForkHub catalog namespace)
++ */
++export function extractVersionFromTag(tag: string): string {
++  const namespaced = tag.includes("--") ? tag.split("--").pop() ?? tag : tag;
++  // Case-insensitive leading-v strip: catalog tags may carry upstream's
++  // capital-V style (`<slug>--V2.8.8-fh1`).
++  return namespaced.replace(/^v/i, "");
++}
++
++/**
++ * Fork-build ordering tiebreak for version gates that strip `-.*`
++ * pre-release suffixes before comparing (see main.ts isRealUpgrade /
++ * isVersionNewer).
++ *
++ * Returns true only when the remote carries a strictly newer
++ * `-fh.<owner>.<n>` rebuild counter for the SAME owner. Stock↔fork and
++ * cross-owner comparisons always return false, so a fork build can never
++ * auto-take (or be taken by) a foreign build.
++ */
++export function isForkCounterUpgrade(current: string, remote: string): boolean {
++  const parse = (v: string): { owner: string; n: number } | null => {
++    // Owner class includes `-` for hyphenated publishers (e.g. `with-fh`).
++    const m = /-fh\.([a-z0-9-]+)\.(\d+)$/i.exec(v.trim());
++    if (!m) return null;
++    const n = parseInt(m[2], 10);
++    return Number.isFinite(n) ? { owner: m[1].toLowerCase(), n } : null;
++  };
++  const c = parse(current);
++  const r = parse(remote);
++  return !!c && !!r && c.owner === r.owner && r.n > c.n;
++}
++
++export interface BundleTagInfo {
++  /** Upstream base version, e.g. "2.9.2". */
++  base: string;
++  /** Bundle counter N in `<slug>--v<base>-fh<N>`. */
++  n: number;
++}
++
++/**
++ * Parses a ForkHub bundle tag
++ * (`<slug>--v<base>-fh<N>`, e.g.
++ * `natively-ai-assistant-natively-cluely-ai-assistant--v2.9.2-fh6`).
++ * Returns null for anything else (updater releases, stock tags).
++ */
++export function parseBundleTag(tag: string): BundleTagInfo | null {
++  const m = /--v?(\d+\.\d+\.\d+)-fh(\d+)$/i.exec(tag.trim());
++  if (!m) return null;
++  const n = parseInt(m[2], 10);
++  return Number.isFinite(n) ? { base: m[1], n } : null;
++}
++
++/**
++ * Bundle counter baked at package time (see build.sh `forkhubBundleN`).
++ * Null when this build predates the stamp (or in dev) — callers then fall
++ * back to the version gates. Lazy electron require keeps this module
++ * importable in plain node (see tests).
++ */
++export function readBakedBundleN(): number | null {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { app } = require("electron") as typeof import("electron");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const pathMod = require("path") as typeof import("path");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const fsMod = require("fs") as typeof import("fs");
++    const pkg = JSON.parse(
++      fsMod.readFileSync(pathMod.join(app.getAppPath(), "package.json"), "utf8")
++    );
++    const raw = pkg?.build?.extraMetadata?.forkhubBundleN;
++    const n = typeof raw === "number" ? raw : parseInt(String(raw ?? ""), 10);
++    return Number.isFinite(n) ? n : null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Bundle-counter ordering for the manual catalog compare (see main.ts
++ * checkForUpdatesManual): that compare resolves bundle tags, whose
++ * `-fh<N>` counters live in a different series than the installed updater
++ * version (`-fh.<owner>.<n>`), so the version gates cannot order them
++ * (same base compares equal, and the no-cross-talk guard refuses).
++ * When this build knows its own bundle counter and the latest tag is a
++ * same-base bundle, order by counter. Anything else returns false so
++ * callers fall through to the version gates (which own cross-base and
++ * updater-tag comparisons).
++ */
++export function isBundleCounterUpgrade(
++  installedN: number | null | undefined,
++  latestTag: string,
++  currentVersion: string
++): boolean {
++  if (installedN == null || !Number.isFinite(installedN)) return false;
++  const info = parseBundleTag(latestTag);
++  if (!info) return false;
++  const currentBase = currentVersion.replace(/^v/i, "").split("-")[0];
++  if (info.base !== currentBase) return false;
++  return info.n > installedN;
++}
+diff --git a/electron/update/updatePublisher.test.mjs b/electron/update/updatePublisher.test.mjs
+new file mode 100644
+index 0000000..f2bb0e2
+--- /dev/null
++++ b/electron/update/updatePublisher.test.mjs
+@@ -0,0 +1,174 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { fileURLToPath, pathToFileURL } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const {
++  normalizeUpdateOwner,
++  summarizePublisherReleases,
++  checkPublisherCatalog,
++  applyForkFeed,
++  getUpdateFeed,
++} = await import(
++  pathToFileURL(path.resolve(__dirname, '../../dist-electron/electron/update/updateFeed.js')).href
++);
++
++test('normalizeUpdateOwner accepts GitHub login shapes, lowercases', () => {
++  assert.equal(normalizeUpdateOwner('with-fh'), 'with-fh');
++  assert.equal(normalizeUpdateOwner('  With-FH  '), 'with-fh');
++  assert.equal(normalizeUpdateOwner('a'), 'a');
++  assert.equal(normalizeUpdateOwner('x'.repeat(39)), 'x'.repeat(39));
++});
++
++test('normalizeUpdateOwner rejects bad input', () => {
++  assert.equal(normalizeUpdateOwner(''), null);
++  assert.equal(normalizeUpdateOwner('   '), null);
++  assert.equal(normalizeUpdateOwner('has space'), null);
++  assert.equal(normalizeUpdateOwner('under_score'), null);
++  assert.equal(normalizeUpdateOwner('-lead'), null);
++  assert.equal(normalizeUpdateOwner('trail-'), null);
++  assert.equal(normalizeUpdateOwner('x'.repeat(40)), null);
++  assert.equal(normalizeUpdateOwner(null), null);
++  assert.equal(normalizeUpdateOwner(undefined), null);
++  assert.equal(normalizeUpdateOwner(42), null);
++});
++
++test('summarizePublisherReleases counts published non-drafts only', () => {
++  assert.equal(summarizePublisherReleases(null), 0);
++  assert.equal(summarizePublisherReleases({}), 0);
++  assert.equal(summarizePublisherReleases([]), 0);
++  assert.equal(
++    summarizePublisherReleases([
++      { tag_name: 'v1', draft: false },
++      { tag_name: 'v2' },
++      { tag_name: 'v3', draft: true },
++      { tag_name: 'v4', prerelease: true, draft: false },
++    ]),
++    3
++  );
++});
++
++function stubFetch(handler) {
++  const calls = [];
++  const fn = async (url, init) => {
++    calls.push({ url, init });
++    return handler(url);
++  };
++  fn.calls = calls;
++  return fn;
++}
++
++const okReleases = (items) => ({
++  ok: true,
++  status: 200,
++  json: async () => items,
++});
++
++test('checkPublisherCatalog accepts an owner with published releases', async () => {
++  const fetchImpl = stubFetch(() =>
++    okReleases([{ tag_name: 'a', draft: false }, { tag_name: 'b', draft: true }])
++  );
++  const res = await checkPublisherCatalog('With-FH', fetchImpl);
++  assert.equal(res.ok, true);
++  assert.equal(res.owner, 'with-fh');
++  assert.equal(res.repo, '.forkhub');
++  assert.equal(res.releases, 1);
++  assert.match(fetchImpl.calls[0].url, /\/repos\/with-fh\/\.forkhub\/releases/);
++});
++
++test('checkPublisherCatalog rejects invalid owner without fetching', async () => {
++  const fetchImpl = stubFetch(() => okReleases([]));
++  const res = await checkPublisherCatalog('bad owner!', fetchImpl);
++  assert.equal(res.ok, false);
++  assert.equal(fetchImpl.calls.length, 0);
++});
++
++test('checkPublisherCatalog rejects empty catalogs', async () => {
++  const fetchImpl = stubFetch(() => okReleases([{ tag_name: 'd', draft: true }]));
++  const res = await checkPublisherCatalog('with-fh', fetchImpl);
++  assert.equal(res.ok, false);
++  assert.match(res.message, /no published releases/i);
++});
++
++test('checkPublisherCatalog maps 404 / 403 / 500 / network failure', async () => {
++  const notFound = await checkPublisherCatalog(
++    'ghost',
++    stubFetch(() => ({ ok: false, status: 404, json: async () => ({}) }))
++  );
++  assert.equal(notFound.ok, false);
++  assert.match(notFound.message, /No public/i);
++
++  const limited = await checkPublisherCatalog(
++    'with-fh',
++    stubFetch(() => ({ ok: false, status: 403, json: async () => ({}) }))
++  );
++  assert.equal(limited.ok, false);
++  assert.match(limited.message, /rate-limited/i);
++
++  const broken = await checkPublisherCatalog(
++    'with-fh',
++    stubFetch(() => ({ ok: false, status: 500, json: async () => ({}) }))
++  );
++  assert.equal(broken.ok, false);
++  assert.match(broken.message, /HTTP 500/);
++
++  const offline = await checkPublisherCatalog('with-fh', async () => {
++    throw new Error('boom');
++  });
++  assert.equal(offline.ok, false);
++  assert.match(offline.message, /connection/i);
++});
++
++test('applyForkFeed follows the fh channel with prereleases, no downgrade', () => {
++  const calls = [];
++  const updater = {
++    set channel(v) {
++      calls.push(['channel', v]);
++      // Mirror electron-updater's F-707 setter clobber.
++      this.allowDowngrade = true;
++    },
++    setFeedURL: (opts) => calls.push(['setFeedURL', opts]),
++  };
++  let flags = { allowDowngrade: undefined, allowPrerelease: undefined };
++  Object.defineProperties(updater, {
++    allowDowngrade: {
++      get: () => flags.allowDowngrade,
++      set: (v) => {
++        flags.allowDowngrade = v;
++        calls.push(['allowDowngrade', v]);
++      },
++    },
++    allowPrerelease: {
++      get: () => flags.allowPrerelease,
++      set: (v) => {
++        flags.allowPrerelease = v;
++        calls.push(['allowPrerelease', v]);
++      },
++    },
++  });
++  applyForkFeed(updater, { owner: 'with-fh', repo: '.forkhub' });
++  const kinds = calls.map((c) => c[0]);
++  assert.deepEqual(kinds, ['channel', 'allowDowngrade', 'allowDowngrade', 'setFeedURL', 'allowPrerelease']);
++  // The restore must come AFTER the setter clobber (F-707).
++  assert.equal(calls[kinds.lastIndexOf('allowDowngrade')][1], false);
++  assert.deepEqual(calls.find((c) => c[0] === 'setFeedURL')[1], {
++    provider: 'github',
++    owner: 'with-fh',
++    repo: '.forkhub',
++  });
++  assert.equal(flags.allowPrerelease, true);
++});
++
++test('getUpdateFeed defaults to with-fh/.forkhub in plain node (no persisted store)', () => {
++  const savedOwner = process.env.NATIVELY_UPDATE_OWNER;
++  const savedRepo = process.env.NATIVELY_UPDATE_REPO;
++  delete process.env.NATIVELY_UPDATE_OWNER;
++  delete process.env.NATIVELY_UPDATE_REPO;
++  try {
++    assert.deepEqual(getUpdateFeed(), { owner: 'with-fh', repo: '.forkhub' });
++  } finally {
++    if (savedOwner !== undefined) process.env.NATIVELY_UPDATE_OWNER = savedOwner;
++    if (savedRepo !== undefined) process.env.NATIVELY_UPDATE_REPO = savedRepo;
++  }
++});
+diff --git a/package.json b/package.json
+index c9806cb..fde61ad 100644
+--- a/package.json
++++ b/package.json
+@@ -275,7 +275,12 @@
+         }
+       ],
+       "icon": "assets/icons/png/",
+-      "category": "Office"
++      "category": "Office",
++      "desktop": {
++        "entry": {
++          "StartupWMClass": "Natively"
++        }
++      }
+     },
+     "nsis": {
+       "oneClick": false,
+@@ -284,11 +289,14 @@
+       "deleteAppDataOnUninstall": false,
+       "artifactName": "${productName}-Setup-${version}.${ext}"
+     },
++    "deb": {
++      "afterInstall": "./scripts/deb-after-install.sh"
++    },
+     "publish": [
+       {
+         "provider": "github",
+-        "owner": "Natively-AI-assistant",
+-        "repo": "natively-cluely-ai-assistant",
++        "owner": "with-fh",
++        "repo": ".forkhub",
+         "releaseType": "release"
+       }
+     ],
+diff --git a/scripts/deb-after-install.sh b/scripts/deb-after-install.sh
+new file mode 100644
+index 0000000..17dfa37
+--- /dev/null
++++ b/scripts/deb-after-install.sh
+@@ -0,0 +1,22 @@
++#!/bin/sh
++# deb post-install hook (fpm --after-install, wired via package.json
++# `deb.afterInstall`). Refreshes the desktop database and icon caches so
++# the app grid shows Natively immediately with its icon, without waiting
++# for a session restart. dpkg triggers usually cover this on Ubuntu, but
++# not on every derivative — every command here is best-effort (`|| true`)
++# so a missing tool can never fail the install.
++set -u
++
++if command -v update-desktop-database >/dev/null 2>&1; then
++  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
++fi
++
++if command -v gtk-update-icon-cache >/dev/null 2>&1; then
++  gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
++fi
++
++if command -v update-icon-caches >/dev/null 2>&1; then
++  update-icon-caches /usr/share/icons/hicolor >/dev/null 2>&1 || true
++fi
++
++exit 0
+diff --git a/src/components/AboutSection.tsx b/src/components/AboutSection.tsx
+index 5944b31..0c26e15 100644
+--- a/src/components/AboutSection.tsx
++++ b/src/components/AboutSection.tsx
+@@ -104,6 +104,10 @@ const PRIVACY: AboutItem[] = [
+ 
+ const REPO_URL = 'https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant';
+ const DONATE_URL = 'https://buymeacoffee.com/evinjohnn';
++// ForkHub: the Support button opens the original creator link AND the fork
++// maintainer's sponsors page, so both get funded.
++const FORK_SPONSORS_URL = 'https://github.com/sponsors/ImBIOS/';
++const MAINTAINER_GITHUB_URL = 'https://github.com/ImBIOS';
+ 
+ const CREATOR_LINKS = [
+     { label: 'GitHub', url: REPO_URL, Icon: Github },
+@@ -112,6 +116,12 @@ const CREATOR_LINKS = [
+     { label: 'Instagram', url: 'https://www.instagram.com/evinjohnn/', Icon: Instagram },
+ ];
+ 
++// ForkHub: the maintainer's links — profile and sponsors page.
++const MAINTAINER_LINKS = [
++    { label: 'GitHub', url: MAINTAINER_GITHUB_URL, Icon: Github },
++    { label: 'Sponsor', url: FORK_SPONSORS_URL, Icon: Heart },
++];
++
+ // About is built from `./settings/SettingsRow` — the module General, Audio,
+ // Sync, Intelligence and Provider Performance are built from, whose own header
+ // says it exists "so a pane that adopts the Settings look takes the same
+@@ -211,17 +221,23 @@ export const AboutSection: React.FC<AboutSectionProps> = ({ onNavigate, onOpenMo
+         return () => window.removeEventListener('focus', handleFocus);
+     }, []);
+ 
++    const openExternal = (url: string) => {
++        if (window.electronAPI?.openExternal) {
++            window.electronAPI.openExternal(url);
++        } else {
++            window.open(url, '_blank');
++        }
++    };
++
+     const openLink = (url: string) => {
+         // Returning >20s after opening the donation page marks it complete (above).
+         if (url === DONATE_URL) {
+             donationClickTimeRef.current = Date.now();
++            // ForkHub: also open the fork maintainer's sponsors page.
++            openExternal(FORK_SPONSORS_URL);
+         }
+ 
+-        if (window.electronAPI?.openExternal) {
+-            window.electronAPI.openExternal(url);
+-        } else {
+-            window.open(url, '_blank');
+-        }
++        openExternal(url);
+     };
+ 
+     const iconLinks = (links: typeof CREATOR_LINKS) => (
+@@ -406,6 +422,15 @@ export const AboutSection: React.FC<AboutSectionProps> = ({ onNavigate, onOpenMo
+                         description="I build software that stays out of the way."
+                         control={iconLinks(CREATOR_LINKS)}
+                     />
++                    {/* Fork Maintainer (ForkHub): who ships this build — the
++                        initials tile keeps binary assets out of the patch. */}
++                    <SettingsRow
++                        icon={<span className="flex h-full w-full items-center justify-center text-sm font-bold text-violet-300">IA</span>}
++                        title="Imamuzzaki Abu Salam"
++                        badge={<LiquidGlassBadge variant="neutral">{t('Fork Maintainer')}</LiquidGlassBadge>}
++                        description={t('Maintains the ForkHub build: independent releases, Linux installers, and auto-updates from the fork catalog.')}
++                        control={iconLinks(MAINTAINER_LINKS)}
++                    />
+                     {actions.map(({ title, body, action }) => (
+                         <CommunityActionRow key={title} title={title} body={body} control={action} />
+                     ))}
+diff --git a/src/components/SettingsOverlay.tsx b/src/components/SettingsOverlay.tsx
+index e37af56..4b28461 100644
+--- a/src/components/SettingsOverlay.tsx
++++ b/src/components/SettingsOverlay.tsx
+@@ -797,6 +797,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+     const [isThemeDropdownOpen, setIsThemeDropdownOpen] = useState(false);
+     const [isAiLangDropdownOpen, setIsAiLangDropdownOpen] = useState(false);
+     const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'available' | 'uptodate' | 'error'>('idle');
++    // ForkHub publisher override: which account's `.forkhub` catalog this
++    // install updates from (default `with-fh`). Mirrors T3 Code's ForkHub
++    // publisher row — input + Check above the update button.
++    const [publisherInput, setPublisherInput] = useState<string | null>(null);
++    const [publisherFeed, setPublisherFeed] = useState<{ owner: string; repo: string } | null>(null);
++    const [publisherCheck, setPublisherCheck] = useState<
++        { status: 'idle' } | { status: 'checking' } | { status: 'valid'; releases: number } | { status: 'invalid'; message: string }
++    >({ status: 'idle' });
+     const themeDropdownRef = React.useRef<HTMLDivElement>(null);
+     const aiLangDropdownRef = React.useRef<HTMLDivElement>(null);
+     const [meetingInterfaceTheme, setMeetingInterfaceThemeState] = useState<MeetingInterfaceTheme>(getMeetingInterfaceTheme);
+@@ -2042,9 +2050,44 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+         }
+     };
+ 
++    const publisherValue = publisherInput ?? publisherFeed?.owner ?? '';
++    const isCheckingPublisher = publisherCheck.status === 'checking';
++
++    const handlePublisherCheck = async () => {
++        if (isCheckingPublisher) return;
++        const typed = publisherValue.trim();
++        if (!typed) {
++            setPublisherCheck({ status: 'invalid', message: t('Enter a GitHub username or org first.') });
++            return;
++        }
++        setPublisherCheck({ status: 'checking' });
++        try {
++            // @ts-ignore
++            const result = await window.electronAPI?.setUpdateFeedOwner?.(typed);
++            if (result?.ok) {
++                setPublisherFeed({ owner: result.owner, repo: result.repo });
++                setPublisherInput(null);
++                setPublisherCheck({ status: 'valid', releases: result.releases });
++                // The feed is repointed — run a Check against it right away.
++                handleCheckForUpdates();
++            } else {
++                setPublisherCheck({ status: 'invalid', message: result?.message ?? t('Publisher check failed.') });
++            }
++        } catch (e: any) {
++            console.error("Failed to set update publisher:", e);
++            setPublisherCheck({ status: 'invalid', message: e?.message ?? t('Publisher check failed.') });
++        }
++    };
++
+     useEffect(() => {
+         if (!isOpen) return;
+ 
++        // Effective update feed (persisted publisher override or default).
++        // @ts-ignore
++        window.electronAPI?.getUpdateFeed?.().then((feed: any) => {
++            if (feed?.owner) setPublisherFeed({ owner: feed.owner, repo: feed.repo ?? '.forkhub' });
++        }).catch(() => {});
++
+         const unsubs = [
+             window.electronAPI.onUpdateChecking(() => {
+                 setUpdateStatus('checking');
+@@ -2823,6 +2866,75 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
+                                                     </div>
+                                                 </div>
+ 
++                                                {/* ForkHub publisher: which account's `.forkhub`
++                                                    catalog this install updates from. The Check
++                                                    validates the catalog, persists the owner, and
++                                                    repoints the updater feed. */}
++                                                <div className="flex items-center justify-between gap-4 px-4 py-3">
++                                                    <div className="flex items-center gap-4 min-w-0">
++                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
++                                                            <Globe size={20} />
++                                                        </div>
++                                                        <div className="min-w-0">
++                                                            <h3 className="text-sm font-bold text-text-primary">{t('ForkHub publisher')}</h3>
++                                                            <p className="text-xs text-text-secondary mt-0.5">
++                                                                {publisherFeed
++                                                                    ? t('Updating from releases.')
++                                                                    : t('Profile or org whose .forkhub releases this app updates from.')}
++                                                            </p>
++                                                            {publisherFeed && (
++                                                                <p className="text-xs text-text-tertiary mt-0.5 tabular-nums">
++                                                                    {publisherFeed.owner}/{publisherFeed.repo}
++                                                                </p>
++                                                            )}
++                                                            {publisherCheck.status === 'valid' ? (
++                                                                <p className="text-xs text-green-400 mt-0.5">
++                                                                    {t('Publisher connected — catalog releases:')} {publisherCheck.releases}
++                                                                </p>
++                                                            ) : publisherCheck.status === 'invalid' ? (
++                                                                <p className="text-xs text-red-400 mt-0.5" role="alert">
++                                                                    {publisherCheck.message}
++                                                                </p>
++                                                            ) : null}
++                                                        </div>
++                                                    </div>
++                                                    <div className="flex items-center gap-2 shrink-0">
++                                                        <input
++                                                            value={publisherValue}
++                                                            onChange={(e) => {
++                                                                setPublisherInput(e.target.value);
++                                                                setPublisherCheck({ status: 'idle' });
++                                                            }}
++                                                            onKeyDown={(e) => {
++                                                                if (e.key === 'Enter') void handlePublisherCheck();
++                                                            }}
++                                                            placeholder="with-fh"
++                                                            aria-label={t('ForkHub profile or org')}
++                                                            autoComplete="off"
++                                                            spellCheck={false}
++                                                            data-1p-ignore
++                                                            className="bg-bg-input border border-border-subtle text-text-primary px-2.5 py-1.5 rounded-lg text-xs font-medium w-[130px] placeholder:text-text-tertiary focus:outline-none focus:border-text-tertiary transition-colors"
++                                                        />
++                                                        <button
++                                                            onClick={() => void handlePublisherCheck()}
++                                                            disabled={isCheckingPublisher || publisherValue.trim().length === 0}
++                                                            className="px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors flex items-center justify-center gap-2 shrink-0 min-w-[80px] bg-bg-component hover:bg-bg-elevated text-text-primary border-border-subtle disabled:opacity-50 disabled:cursor-wait"
++                                                        >
++                                                            {isCheckingPublisher ? (
++                                                                <>
++                                                                    <RefreshCw size={14} className="animate-spin" />
++                                                                    {t('Checking')}
++                                                                </>
++                                                            ) : (
++                                                                <>
++                                                                    <Check size={14} />
++                                                                    {t('Check')}
++                                                                </>
++                                                            )}
++                                                        </button>
++                                                    </div>
++                                                </div>
++
+                                                 {/* Version. items-center like the Theme and Language rows:
+                                                     items-start pinned the Check button 5px above their
+                                                     buttons, which sit on their tile's centre line. */}
+diff --git a/src/components/UpdateBanner.tsx b/src/components/UpdateBanner.tsx
+index b7990f1..8478c52 100644
+--- a/src/components/UpdateBanner.tsx
++++ b/src/components/UpdateBanner.tsx
+@@ -14,6 +14,20 @@ type ParsedReleaseNotes = {
+     url?: string;
+ };
+ 
++const UPSTREAM_OWNER = 'Natively-AI-assistant';
++const UPSTREAM_REPO = 'natively-cluely-ai-assistant';
++
++// Manual-download fallback links follow the update feed (ForkHub catalog for
++// fork builds — see electron/update/updateFeed.ts, exposed via the
++// `get-update-feed` IPC because the renderer cannot read main's env). On fork
++// feeds asset naming is owned by the fork's release workflow, so the latest
++// release page (which always exists) is linked instead of a guessed asset URL
++// that may 404. Unknown feed → upstream links (back-compat default).
++const latestReleasePageUrl = (feed: { owner: string; repo: string } | null) =>
++    feed
++        ? `https://github.com/${feed.owner}/${feed.repo}/releases/latest`
++        : `https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/releases/latest`;
++
+ const UpdateBanner: React.FC = () => {
+     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+     const [parsedNotes, setParsedNotes] = useState<ParsedReleaseNotes | null>(null);
+@@ -27,6 +41,10 @@ const UpdateBanner: React.FC = () => {
+     // any packaged Windows/Linux build). Drives whether "Install" runs the real
+     // in-app download flow or just opens the release page.
+     const [canAutoUpdate, setCanAutoUpdate] = useState(false);
++    // Update feed (ForkHub catalog for fork builds). Drives the
++    // manual-download fallback links; the in-app updater itself is repointed
++    // main-side.
++    const [updateFeed, setUpdateFeed] = useState<{ owner: string; repo: string } | null>(null);
+     // Tracks whether the user explicitly dismissed the toast — progress events
+     // should not override a deliberate dismiss.
+     const userDismissedRef = useRef(false);
+@@ -43,6 +61,12 @@ const UpdateBanner: React.FC = () => {
+                 // Silent failure falls through to default false (manual fallback) — log for observability.
+                 console.warn('[UpdateBanner] getCanAutoUpdate failed, using manual fallback:', err);
+             });
++        window.electronAPI.getUpdateFeed?.()
++            .then((feed) => { if (!cancelled && feed?.owner && feed?.repo) setUpdateFeed(feed); })
++            .catch((err) => {
++                if (cancelled) return;
++                console.warn('[UpdateBanner] getUpdateFeed failed, using upstream links:', err);
++            });
+         return () => { cancelled = true; };
+     }, []);
+ 
+@@ -190,9 +214,11 @@ const UpdateBanner: React.FC = () => {
+ 
+         // A macOS build that can't install in place (unsigned: a dev build, or
+         // one built from source) can't be updated from here; release builds are
+-        // signed and never get this far. Send it to the release page instead.
++        // signed and never get this far. Send it to the release page instead —
++        // the fork catalog's latest page on fork feeds (asset naming there is
++        // owned by the fork's release workflow), upstream's otherwise.
+         if (window.electronAPI.platform === 'darwin') {
+-            window.electronAPI.openExternal(parsedNotes?.url || LATEST_RELEASE_URL);
++            window.electronAPI.openExternal(parsedNotes?.url || latestReleasePageUrl(updateFeed));
+             handleClose();
+             return;
+         }
+@@ -247,6 +273,7 @@ const UpdateBanner: React.FC = () => {
+             status={status}
+             errorMessage={errorMessage}
+             canAutoUpdate={canAutoUpdate}
++            fallbackReleaseUrl={latestReleasePageUrl(updateFeed)}
+         />
+         </>
+     );
+diff --git a/src/components/UpdateModal.tsx b/src/components/UpdateModal.tsx
+index 970d2ad..cb92c9c 100644
+--- a/src/components/UpdateModal.tsx
++++ b/src/components/UpdateModal.tsx
+@@ -57,6 +57,9 @@ interface UpdateModalProps {
+     status: 'idle' | 'downloading' | 'ready' | 'error';
+     errorMessage?: string | null;
+     canAutoUpdate?: boolean;
++    /** Feed-driven manual-download fallback (ForkHub catalog page on fork
++        feeds); defaults to the upstream latest-release page. */
++    fallbackReleaseUrl?: string;
+     /** Skip the close genie: the corner toast is taking the card's place. */
+     closeInstantly?: boolean;
+ }
+@@ -320,6 +323,7 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
+     status,
+     errorMessage,
+     closeInstantly = false,
++    fallbackReleaseUrl,
+ }) => {
+     const t = useT();
+     const reduced = useReducedMotion() ?? false;
+@@ -344,7 +348,7 @@ const UpdateModal: React.FC<UpdateModalProps> = ({
+         if (key === 'improvements') return n === 1 ? t('1 improvement') : fill(t('{n} improvements'), { n });
+         return n === 1 ? t('1 fix') : fill(t('{n} fixes'), { n });
+     };
+-    const releaseUrl = parsedNotes?.url || LATEST_RELEASE_URL;
++    const releaseUrl = parsedNotes?.url || fallbackReleaseUrl || LATEST_RELEASE_URL;
+ 
+     const progress = status === 'ready' ? 100 : Math.max(0, Math.min(100, downloadProgress || 0));
+     const busy = status === 'downloading' || status === 'ready';
+diff --git a/src/components/ui/ConnectCalendarButton.tsx b/src/components/ui/ConnectCalendarButton.tsx
+index b8e9669..b16dbd2 100644
+--- a/src/components/ui/ConnectCalendarButton.tsx
++++ b/src/components/ui/ConnectCalendarButton.tsx
+@@ -100,6 +100,10 @@ const ConnectCalendarButton: React.FC<ConnectCalendarButtonProps> = ({ className
+             } else if (res.error) {
+                 console.error('[ConnectCalendarButton] Connection error:', res.error);
+                 setError(res.error);
++            } else {
++                // No success and no message (e.g. a misconfigured build that
++                // refuses without detail) — say so instead of dying silently.
++                setError(t('Could not connect calendar'));
+             }
+         } catch (err: any) {
+             console.error('[ConnectCalendarButton] Connection exception:', err);
+diff --git a/src/lib/trial/__tests__/trialStart.test.mjs b/src/lib/trial/__tests__/trialStart.test.mjs
+index 73fd977..02a94c8 100644
+--- a/src/lib/trial/__tests__/trialStart.test.mjs
++++ b/src/lib/trial/__tests__/trialStart.test.mjs
+@@ -23,7 +23,8 @@ const rows = [
+   ['server error', { ok: false, error: 'request_failed', status: 503 }, 'failed'],
+   ['network error', { ok: false, error: 'fetch failed' }, 'failed'],
+   ['timeout', { ok: false, error: 'The operation was aborted due to timeout' }, 'failed'],
+-  ['no device id', { ok: false, error: 'hardware_id_unavailable' }, 'failed'],
++  ['no device id', { ok: false, error: 'hardware_id_unavailable' }, 'no_device_id'],
++  ['unreadable device id', { ok: false, error: 'invalid_hwid' }, 'no_device_id'],
+   ['ok but no token', { ok: true, hasToken: false }, 'failed'],
+   // The trial runs this session (main keeps the token in memory and has
+   // announced it); the start endpoint is idempotent per device, so "failed"
+@@ -65,7 +66,7 @@ test('startTrialWithRetry: a thrown IPC error counts as our error', async () =>
+   assert.equal(calls.n, 2);
+ });
+ 
+-for (const [kind, reply] of [['unavailable', { ok: true, expired: true }], ['rate_limited', { ok: false, error: 'trial_start_rate_limited' }], ['started', { ok: true, hasToken: true }]]) {
++for (const [kind, reply] of [['unavailable', { ok: true, expired: true }], ['rate_limited', { ok: false, error: 'trial_start_rate_limited' }], ['started', { ok: true, hasToken: true }], ['no_device_id', { ok: false, error: 'invalid_hwid' }]]) {
+   test(`startTrialWithRetry: ${kind} is final, no retry`, async () => {
+     const { start, calls } = fakeStart([reply]);
+     const w = waits();
+@@ -76,7 +77,7 @@ for (const [kind, reply] of [['unavailable', { ok: true, expired: true }], ['rat
+ }
+ 
+ test('the copy never shows a code', () => {
+-  assert.deepEqual(Object.keys(TRIAL_START_COPY).sort(), ['failed', 'rate_limited', 'unavailable']);
++  assert.deepEqual(Object.keys(TRIAL_START_COPY).sort(), ['failed', 'no_device_id', 'rate_limited', 'unavailable']);
+   for (const [kind, text] of Object.entries(TRIAL_START_COPY)) {
+     assert.ok(!/_|\bhttp\b|\d{3}/.test(text), `${kind}: ${text}`);
+     assert.ok(text.endsWith('.'), kind);
+diff --git a/src/lib/trial/trialStart.mjs b/src/lib/trial/trialStart.mjs
+index 2187142..3a813df 100644
+--- a/src/lib/trial/trialStart.mjs
++++ b/src/lib/trial/trialStart.mjs
+@@ -6,11 +6,16 @@
+ 
+ const UNAVAILABLE_CODES = new Set(['trial_ip_limit', 'already_used', 'trial_already_used', 'trial_expired']);
+ const RATE_LIMITED_CODES = new Set(['trial_start_rate_limited']);
++// FORKHUB: the device id could not be read at all (main's trial:start found
++// no stable hardware id, or the server rejected the binding). This is not a
++// network error and retrying will not help — the user must restart the app.
++// (NativelyApiSettings shows the same copy for both codes on its own path.)
++const NO_DEVICE_ID_CODES = new Set(['invalid_hwid', 'hardware_id_unavailable']);
+ 
+ /**
+  * @param {{ ok?: boolean, hasToken?: boolean, persisted?: boolean, expired?: boolean,
+  *           already_used?: boolean, error?: string, status?: number } | null | undefined} res
+- * @returns {'started' | 'unavailable' | 'rate_limited' | 'failed'}
++ * @returns {'started' | 'unavailable' | 'rate_limited' | 'no_device_id' | 'failed'}
+  */
+ export function classifyTrialStart(res) {
+   if (!res || typeof res !== 'object') return 'failed';
+@@ -26,6 +31,7 @@ export function classifyTrialStart(res) {
+   }
+   if (typeof res.error === 'string' && UNAVAILABLE_CODES.has(res.error)) return 'unavailable';
+   if ((typeof res.error === 'string' && RATE_LIMITED_CODES.has(res.error)) || res.status === 429) return 'rate_limited';
++  if (typeof res.error === 'string' && NO_DEVICE_ID_CODES.has(res.error)) return 'no_device_id';
+   return 'failed';
+ }
+ 
+@@ -55,4 +61,5 @@ export const TRIAL_START_COPY = Object.freeze({
+   failed: "Couldn't reach Natively. Check your connection and try again.",
+   rate_limited: 'Too many attempts. Try again later.',
+   unavailable: 'The free trial has already been used on this device.',
++  no_device_id: 'Could not read device ID. Restart the app and try again.',
+ });
+diff --git a/src/types/electron.d.ts b/src/types/electron.d.ts
+index 912b3b6..dc83a9e 100644
+--- a/src/types/electron.d.ts
++++ b/src/types/electron.d.ts
+@@ -985,6 +985,14 @@ export interface ElectronAPI {
+   checkForUpdates: () => Promise<void>
+   downloadUpdate: () => Promise<void>
+   getCanAutoUpdate: () => Promise<{ canAutoUpdate: boolean }>
++  getUpdateFeed: () => Promise<{ owner: string; repo: string }>
++  setUpdateFeedOwner: (owner: string) => Promise<{
++    ok: boolean;
++    owner: string;
++    repo: string;
++    releases: number;
++    message: string;
++  }>
+   testReleaseFetch: () => Promise<{ success: boolean; error?: string }>
+ 
+   // RAG (Retrieval-Augmented Generation) API
