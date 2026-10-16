@@ -121,6 +121,9 @@ jobs:
           echo "order=$(jq -c .apply_order "$M")" >> "$GITHUB_OUTPUT"
           # Per-OS skip marker glob for this leg (empty = legacy behavior).
           echo "os_marker=$(jq -r --arg k "${{ matrix.pair.os_key }}" '.build_skip_markers[$k] // empty' "$U")" >> "$GITHUB_OUTPUT"
+          # All markers ("os:glob ...") for the converge-numbering rule in
+          # build.sh (empty = single-OS target, legacy numbering).
+          echo "all_markers=$(jq -r '(.build_skip_markers // {}) | to_entries | map("\(.key):\(.value)") | join(" ")' "$U")" >> "$GITHUB_OUTPUT"
 
       - name: "Clone upstream at latest tag (fallback: main branch)"
         run: |
@@ -332,6 +335,7 @@ jobs:
           # reuse + per-OS checksums). Single-OS targets ignore these.
           FORKHUB_OS_KEY: ${{ matrix.pair.os_key }}
           FORKHUB_OS_MARKER: ${{ steps.ctx.outputs.os_marker }}
+          FORKHUB_ALL_MARKERS: ${{ steps.ctx.outputs.all_markers }}
           FORKHUB_OS_SOLE: ${{ matrix.pair.sole }}
         run: |
           set -euo pipefail

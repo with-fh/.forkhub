@@ -80,7 +80,31 @@ FH_VERSION="${VER}-${SUFFIX}.${OWNER}.$((N + 1))"
 # matching updater release, that release is OURS-but-incomplete (a sibling
 # leg published first, or a retry) — reuse its number instead of bumping,
 # so every OS ships under ONE updater release per upstream tag.
-if [ -n "$OS_MARKER" ]; then
+# Multi-OS numbering: every leg must converge on ONE updater release per
+# upstream tag. Bump past the newest matching release ONLY when it is
+# COMPLETE (carries every platform's marker asset); otherwise reuse it so
+# late/resumed legs backfill the same release instead of splitting the
+# feed across two tags (which would strand platforms whose manifests
+# live only in the older release).
+if [ -n "$OS_MARKER" ] && [ -n "${FORKHUB_ALL_MARKERS:-}" ]; then
+  NEWEST=$(printf '%s\n' "$EXISTING_TAGS" | grep -E "^v${ESCAPED_BASE}[-.]${SUFFIX}\\.${OWNER}\\.[0-9]+\$" | sed -E 's/^.*\.([0-9]+)$/\1 &/' | sort -n | tail -1 | sed -E 's/^[0-9]+ //' || true)
+  if [ -n "$NEWEST" ]; then
+    ASSETS=$(gh release view "$NEWEST" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null || true)
+    COMPLETE=1
+    for pair in $FORKHUB_ALL_MARKERS; do
+      m=${pair#*:}
+      [ -n "$m" ] || continue
+      MARKER_RX=$(printf '%s' "$m" | sed 's/\./\\./g; s/\*/.*/g')
+      printf '%s\n' "$ASSETS" | grep -qE "^${MARKER_RX}\$" || COMPLETE=0
+    done
+    if [ "$COMPLETE" = "1" ]; then
+      say "newest $NEWEST is complete on all platforms; numbering past it"
+    else
+      FH_VERSION=$(printf '%s' "$NEWEST" | sed 's/^v//')
+      say "reusing incomplete $NEWEST for $OS_KEY artifacts (as $FH_VERSION)"
+    fi
+  fi
+elif [ -n "$OS_MARKER" ]; then
   MARKER_RX=$(printf '%s' "$OS_MARKER" | sed 's/\./\\./g; s/\*/.*/g')
   # Portable newest-pick (no `sort -V` on macOS): matching tags differ
   # only in the trailing .N counter — order by it.
@@ -130,7 +154,7 @@ else
   UNAME_M=$(uname -m)
   case "$UNAME_S" in
     Linux*) NODE_PLAT="linux"; NODE_EXT="tar.xz" ;;
-    Darwin*) NODE_PLAT="macos"; NODE_EXT="tar.gz" ;;
+    Darwin*) NODE_PLAT="darwin"; NODE_EXT="tar.gz" ;;
     MINGW*|MSYS*|CYGWIN*) NODE_PLAT="win"; NODE_EXT="zip" ;;
     *) fail_soft "unsupported builder OS for node provisioning: $UNAME_S" ;;
   esac
@@ -243,11 +267,13 @@ say "electron bundle"
 npm run build:electron >>"$LOG" 2>&1 || fail_soft "electron bundle failed"
 # --- strip sourcemaps (1.26 GB in v2.9.2: esbuild emits one ~21 MB
 # bundle + ~46 MB map PER electron entry point, all duplicated, plus
-# renderer maps — dead weight in a shipped app with no devtools).
+# renderer maps and every dependency's own maps — dead weight in a
+# shipped app with no devtools).
 # Measured on the v2.9.2 AppImage: 1257 MB of *.map inside app.asar.
-# Upstream ships them; the fork does not.
+# Upstream ships them; the fork does not. Runs after all bundling
+# (nothing at build or runtime reads maps back).
 say "stripping sourcemaps"
-find dist dist-electron -name '*.map' -delete >>"$LOG" 2>&1 || fail_soft "sourcemap strip failed"
+find dist dist-electron node_modules -name '*.map' -delete >>"$LOG" 2>&1 || fail_soft "sourcemap strip failed"
 if [ "$OS_KEY" = "mac" ]; then
   # Both darwin arches from one arm64 runner (mirrors upstream
   # release-macos.yml): the runner cross-builds the Intel package, and

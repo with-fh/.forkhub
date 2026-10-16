@@ -27,10 +27,11 @@ across legs sharing one bundle release).
 
 1. Refuses pre-release tags (`-beta`/`-alpha`/`-rc`/`-preview*`/`-pr.*`).
 2. Numbers the build: `n` counts existing `v<base>-fh.<owner>.N` updater
-   releases so force-rebuilds advance — and when `FORKHUB_OS_MARKER` is
-   set, reuses the newest matching release that still lacks this leg's
-   marker asset instead of bumping, so all three OSs ship under ONE
-   updater release per upstream tag. Exports `FORKHUB_VERSION`.
+   releases so force-rebuilds advance — but bumps past the newest match
+   ONLY when it is complete on every platform (all skip-marker assets
+   present); otherwise reuses it, so all three OS legs converge on ONE
+   updater release per upstream tag instead of splitting the feed.
+   Exports `FORKHUB_VERSION`.
 3. Bootstraps its own toolchain per OS: node 22 (linux/mac/win
    distributions), Rust stable (preinstalled on GHA images; rustup
    fallback on unix), and on linux `build-essential python3 pkg-config
