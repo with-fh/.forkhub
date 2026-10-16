@@ -49,7 +49,10 @@ if [ -z "$HAVE_LINUX$HAVE_MAC$HAVE_WIN" ]; then
   exit 0
 fi
 
-FILES=""
+# NOTE: filenames may contain spaces (Windows portable exe is
+# "<product> <version>.exe"), so the file list uses positional params —
+# never a flat string (word-splitting would break it).
+set --
 if [ -n "$HAVE_LINUX" ]; then
   for f in "$DIST"/*.AppImage "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml "$DIST"/*.blockmap; do
     [ -e "$f" ] || continue
@@ -61,7 +64,7 @@ if [ -n "$HAVE_LINUX" ]; then
         [ -e "$DIST/$base" ] || continue
         ;;
     esac
-    FILES="$FILES $f"
+    set -- "$@" "$f"
   done
 fi
 if [ -n "$HAVE_MAC" ]; then
@@ -73,7 +76,7 @@ if [ -n "$HAVE_MAC" ]; then
         [ -e "$DIST/$base" ] || continue
         ;;
     esac
-    FILES="$FILES $f"
+    set -- "$@" "$f"
   done
 fi
 if [ -n "$HAVE_WIN" ]; then
@@ -85,10 +88,10 @@ if [ -n "$HAVE_WIN" ]; then
         [ -e "$DIST/$base" ] || continue
         ;;
     esac
-    FILES="$FILES $f"
+    set -- "$@" "$f"
   done
 fi
-[ -n "$FILES" ] || { echo "no uploadable updater files; skipping"; exit 0; }
+[ "$#" -gt 0 ] || { echo "no uploadable updater files; skipping"; exit 0; }
 
 # Create the release WITHOUT files first: asset uploads right after a
 # create can 404 while GitHub propagates the release object, and parallel
@@ -107,8 +110,7 @@ fi
 
 # Upload with retries: fresh releases can 404 asset uploads for a short
 # window, and large installers occasionally drop mid-upload.
-# shellcheck disable=SC2086
-for f in $FILES; do
+for f in "$@"; do
   ok=0
   for attempt in 1 2 3; do
     if gh release upload "v$VER" "$f" --repo "$REPO" --clobber; then

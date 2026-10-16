@@ -373,12 +373,20 @@ if [ "$OS_KEY" = "linux" ]; then
     done
   done
 fi
-# The manifests must reference files that actually shipped.
+# The manifests must reference files that actually shipped (read line by
+# line from a temp file — installer names may contain spaces, and a
+# pipeline would run the loop in a subshell where fail_soft's exit
+# could not stop the script).
+URLS="$(mktemp)"
 for yml in "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml "$DIST"/latest-mac.yml "$DIST"/fh-mac.yml "$DIST"/latest.yml "$DIST"/fh.yml; do
   [ -e "$yml" ] || continue
-  for url in $(grep -E '^[[:space:]]*url: ' "$yml" 2>/dev/null | awk '{print $2}'); do
-    [ -e "$DIST/$url" ] || fail_soft "updater manifest references missing file: $url ($yml)"
-  done
+  : >"$URLS"
+  grep -E '^[[:space:]]*url: ' "$yml" 2>/dev/null | sed 's/^[[:space:]]*url: //' >>"$URLS" || true
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    [ -e "$DIST/$url" ] || { rm -f "$URLS"; fail_soft "updater manifest references missing file: $url ($yml)"; }
+  done <"$URLS"
 done
+rm -f "$URLS"
 say "artifacts moved to dist"
 ls "$DIST" | tee -a "$LOG"
