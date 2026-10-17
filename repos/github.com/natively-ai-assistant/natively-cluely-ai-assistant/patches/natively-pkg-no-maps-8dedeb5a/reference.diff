@@ -1,0 +1,14 @@
+diff --git a/package.json b/package.json
+index c9806cb..ec550d2 100644
+--- a/package.json
++++ b/package.json
+@@ -155,7 +155,8 @@
+       "!**/*.log",
+       "!**/*.pdf",
+       "!**/.git",
+-      "!**/node_modules/@typescript/**"
++      "!**/node_modules/@typescript/**",
++      "!**/*.map"
+     ],
+     "asarUnpack": [
+       "**/*.node",

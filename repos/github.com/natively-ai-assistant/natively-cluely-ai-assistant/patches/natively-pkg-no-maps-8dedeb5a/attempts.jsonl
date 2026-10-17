@@ -1,0 +1,1 @@
+{"n":1,"phase":"realization","timestamp":"2026-10-17T10:43:47Z","upstream_tag":"v2.9.2","upstream_sha":"b439c1f0","approach":"one-hunk package.json files-ignore mirroring upstream PR #661; verified to apply first and after with-fh support; config assert + electron bundle green","result":"passed","tokens":0,"model":"manual"}
