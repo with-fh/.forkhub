@@ -64,7 +64,7 @@ jobs:
           else
             URL="https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant.git"
             TAG=$(git ls-remote --tags --sort=-v:refname "$URL" \
-              | grep -io 'refs/tags/v[^^{}]*' | cut -d/ -f3 | grep -Ev -- '-(beta|alpha|rc|preview|nightly|pr)[.-]' | tail -1 || true)
+              | grep -io 'refs/tags/v[^^{}]*' | cut -d/ -f3 | grep -Ev -- '-(beta|alpha|rc|preview|nightly|pr)[.-]' | head -1 || true)
             [ -n "$TAG" ] || { echo "::error::no stable upstream tag found"; exit 1; }
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           fi
