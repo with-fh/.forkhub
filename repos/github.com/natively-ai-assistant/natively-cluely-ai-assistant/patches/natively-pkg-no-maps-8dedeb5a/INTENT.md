@@ -69,7 +69,12 @@ single remaining entry.
 2. **First in apply_order.** Base layer under the with-fh support
    patch; verified to apply to stock v2.9.2 both before and after it.
 3. **No repo-wide test/typecheck runs.** Verify with `verify.sh` only;
-   the full AppImage proof rides the `forkhub-pr-build` workflow.
+   the full AppImage proof rides the `forkhub-pr-build` workflow. Note:
+   the workflow's `pr-only` leg proves apply-clean + config-valid only —
+   stock upstream cannot bundle without its PRIVATE `premium/`
+   submodule (the with-fh support patch is what makes open-source
+   builds work), so only the `full` leg packs; both report into one
+   upstream-PR comment.
 
 ## Implementation notes
 

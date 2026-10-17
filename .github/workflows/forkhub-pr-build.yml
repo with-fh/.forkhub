@@ -95,12 +95,30 @@ jobs:
           git -C "$GITHUB_WORKSPACE/app" apply "$MAPS"
 
       - name: Native prerequisites
+        if: matrix.flavor == 'full'
         run: |
           set -euo pipefail
           sudo apt-get update >>/tmp/apt.log 2>&1 || true
           sudo apt-get install -y build-essential python3 pkg-config libsecret-1-dev libasound2-dev >>/tmp/apt.log 2>&1 || true
 
+      - name: pr-only gate proof (no pack — see note)
+        # Stock upstream cannot bundle without its PRIVATE premium/
+        # submodule (esbuild must resolve bare-branch premium requires;
+        # the with-fh support patch is what makes open-source builds
+        # work). So the pr-only leg proves the intent applies cleanly to
+        # stock and the packaging config is valid; the runnable proof of
+        # the identical one-liner is the full flavor below.
+        if: matrix.flavor == 'pr-only'
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/app"
+          node -e "const p=require('./package.json'); if(!p.build.files.includes('!**/*.map')){console.error('missing map ignore');process.exit(1)} console.log('map ignore present on stock + intent')"
+          mkdir -p /tmp/prlink
+          printf 'applies clean to stock %s + config valid (no pack: stock needs the private premium submodule)' "${{ steps.tag.outputs.tag }}" > /tmp/prlink/pr-only-proof.txt
+          printf '%s' "${{ steps.tag.outputs.tag }}" > /tmp/prlink/pr-only-tag.txt
+
       - name: Install + build + pack AppImage
+        if: matrix.flavor == 'full'
         env:
           ONNXRUNTIME_NODE_INSTALL: skip
           ONNXRUNTIME_NODE_INSTALL_CUDA: skip
@@ -130,6 +148,7 @@ jobs:
           ./node_modules/.bin/electron-builder --linux AppImage --publish never
 
       - name: Publish flavor release
+        if: matrix.flavor == 'full'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -141,7 +160,8 @@ jobs:
           if [ "${{ matrix.flavor }}" = "full" ]; then
             TAG="v$APP_VERSION"
           else
-            TAG="natively-pr${{ inputs.pr || '661' }}-pronly-${{ steps.tag.outputs.tag }}"
+            echo "::error::unexpected flavor ${{ matrix.flavor }} in publish step"
+            exit 1
           fi
           (cd "$GITHUB_WORKSPACE/dist" && sha256sum * > SHA256SUMS || shasum -a 256 * > SHA256SUMS)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -198,10 +218,10 @@ jobs:
             echo
             echo "Upstream PR #$PR — built from ImBIOS/.forkhub intent natively-pkg-no-maps-8dedeb5a @ $SHA ($DATE)."
             echo
-            if [ -f /tmp/prlinks/pr-only-url.txt ]; then
-              echo "- PR-only (stock + this change, exactly what upstream would merge): [$(cat /tmp/prlinks/pr-only-tag.txt)]($(cat /tmp/prlinks/pr-only-url.txt))"
+            if [ -f /tmp/prlinks/pr-only-proof.txt ]; then
+              echo "- PR-only (stock + this change, exactly what upstream would merge): $(cat /tmp/prlinks/pr-only-proof.txt) — runnable proof is the Full build below (same one-liner; stock cannot pack without upstream's private premium submodule)."
             else
-              echo "- PR-only: build did not publish (see the run)."
+              echo "- PR-only: gate did not report (see the run)."
             fi
             if [ -f /tmp/prlinks/full-url.txt ]; then
               echo "- Full ForkHub (with-fh support + this change): [$(cat /tmp/prlinks/full-tag.txt)]($(cat /tmp/prlinks/full-url.txt))"
