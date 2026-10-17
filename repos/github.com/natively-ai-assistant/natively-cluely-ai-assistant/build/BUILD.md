@@ -55,10 +55,8 @@ across legs sharing one bundle release).
    launch) and SmartScreen warnings apply, documented in `CONSUME.md`.
 7. Moves this leg's installers + both updater manifests (`latest-*` stock
    name + `fh-*` twin the app's `fh` channel resolves) + blockmaps into
-   `$GITHUB_WORKSPACE/dist`, renames the AppImage to the descriptive
-   `Natively-*.AppImage` (upstream `productName` is the stealth name;
-   the `.deb` already follows the package `name` and stays untouched),
-   repoints manifests at renamed files, and asserts every manifest
+   `$GITHUB_WORKSPACE/dist` under their original builder-emitted names
+   (AppImage included — no rename), and asserts every manifest
    carries the stamped version and references only shipped files.
 8. Never fails the job: on any failure it packs a patched-source tarball,
    logs to `BUILD_LOG.md`, and exits 0. `publish.sh` then skips the
@@ -96,11 +94,8 @@ deb, checksums, build log, notes).
   identical; only OS trust differs.
 - **Same product name.** The fork build keeps upstream's `productName`
   and appId, so installing it cleanly replaces a stock install and
-  inherits its data — the intended migration path. Only artifact
-  filenames are made descriptive. Only the Linux *artifact filename* is
-  renamed post-build (`Natively-*.AppImage`, per `CONSUME.md`); mac
-  (`Natively-${version}-${arch}`) and win (`Natively-Setup-${version}`)
-  names already come from the builder config and stay untouched.
+  inherits its data — the intended migration path. All artifact
+  filenames stay as the builder emits them (no post-build rename).
 - **Tag note.** The shared clone step only considers lowercase-`v` tags
   (`refs/tags/v*`), so an upstream `V2.8.8`-style capital-V tag is
   invisible and the build follows the newest lowercase tag. If upstream
