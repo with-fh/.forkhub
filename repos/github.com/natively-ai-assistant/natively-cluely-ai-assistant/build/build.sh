@@ -365,40 +365,7 @@ for f in "$DIST"/forkhub/*; do
   mv "$f" "$DIST"/
 done
 rm -rf "$DIST/forkhub" 2>/dev/null || true
-if [ "$OS_KEY" = "linux" ]; then
-  # --- descriptive AppImage name (CONSUME.md promises Natively-*.AppImage) ---
-  # Upstream productName is the stealth name `corespeechd`, which
-  # electron-builder bakes into the AppImage filename. A per-target
-  # artifactName is rejected by electron-builder config schema
-  # (TargetConfiguration allows only target+arch), and a linux-wide
-  # artifactName would also rename the .deb — which already follows the
-  # package `name` (`natively_*_amd64.deb`, as documented) and stays
-  # untouched. So rename just the AppImage (+ sidecar blockmap if emitted)
-  # and repoint the updater manifest at the new name (hashes/sizes cover
-  # file content, so they stay valid).
-  for img in "$DIST"/*.AppImage; do
-    [ -e "$img" ] || continue
-    base=$(basename "$img")
-    case "$base" in
-      Natively-*) say "AppImage already descriptive: $base"; continue ;;
-    esac
-    case "$base" in
-      *-*) new="Natively-${base#*-}" ;;
-      *) fail_soft "unexpected AppImage name without version separator: $base" ;;
-    esac
-    say "renaming AppImage $base -> $new"
-    mv "$img" "$DIST/$new" || fail_soft "AppImage rename failed"
-    if [ -e "$img.blockmap" ]; then
-      mv "$img.blockmap" "$DIST/$new.blockmap" || fail_soft "blockmap rename failed"
-    fi
-    for yml in "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml; do
-      if [ -e "$yml" ]; then
-        sed -i "s/$base/$new/g" "$yml" \
-          || fail_soft "updater manifest repoint failed ($yml)"
-      fi
-    done
-  done
-fi
+# AppImage keeps its original builder-emitted name (no rename).
 # The manifests must reference files that actually shipped (read line by
 # line from a temp file — installer names may contain spaces, and a
 # pipeline would run the loop in a subshell where fail_soft's exit
