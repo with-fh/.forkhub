@@ -10,7 +10,7 @@
   "patches": {
     "t3code-forkhub-update-track-bb0ed06f": {
       "status": "applied",
-      "version": 27,
+      "version": "27.0.0",
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "t3code/forkhub-update-track-t3-code",

@@ -47,8 +47,8 @@ auto-dispatch is suppressed or the router files HUMAN/FAIL.
    - `PROMOTE` — realization present AND `verify.sh` green (re-run
      deterministically by the router, not trusted from the agent).
      Refreshes `reference.diff` canonically (excludes `REALIZATION/`,
-     `NEEDS_HUMAN.md`), bumps patch version (manifest + INTENT
-     frontmatter), stamps `last_realized_against_commit`, appends
+     `NEEDS_HUMAN.md`), bumps semver PATCH (manifest + INTENT
+     frontmatter — MAJOR/MINOR are human-authored with intent changes), stamps `last_realized_against_commit`, appends
      `attempts.jsonl`.
    - `HUMAN` — `NEEDS_HUMAN.md` present; partial work saved to
      `REALIZATION/partial.diff`.

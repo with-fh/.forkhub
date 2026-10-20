@@ -10,35 +10,17 @@
   "patches": {
     "natively-forkhub-support-f276ae13": {
       "status": "draft",
-      "version": 1,
+      "version": "1.0.0",
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "natively/forkhub-support",
       "last_realized_against_commit": "b439c1f0"
-    },
-    "natively-pkg-no-maps-8dedeb5a": {
-      "status": "draft",
-      "version": 1,
-      "author": "Imamuzzaki Abu Salam",
-      "last_modified_by": "Imamuzzaki Abu Salam",
-      "branch": "natively/pkg-no-maps",
-      "last_realized_against_commit": "b439c1f0",
-      "depends_on": [
-        {
-          "repo": "with-fh/.forkhub",
-          "patch": "natively-forkhub-support-f276ae13",
-          "ref": "f797d1a"
-        }
-      ],
-      "upstream_pr": "https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant/pull/661"
     }
   },
   "apply_order": [
-    "natively-pkg-no-maps-8dedeb5a",
     "natively-forkhub-support-f276ae13"
   ],
   "slug_aliases": {
-    "natively-forkhub-support": "natively-forkhub-support-f276ae13",
-    "natively-pkg-no-maps": "natively-pkg-no-maps-8dedeb5a"
+    "natively-forkhub-support": "natively-forkhub-support-f276ae13"
   }
 }

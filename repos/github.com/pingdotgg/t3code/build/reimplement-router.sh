@@ -50,8 +50,10 @@ MANIFEST="$PATCH/../../manifest.json"
 git -C "$WORK" add -N . 2>/dev/null || true
 git -C "$WORK" diff -- . ':!REALIZATION' ':!NEEDS_HUMAN.md' > "$PATCH/reference.diff"
 
-NEW_VERSION=$(jq -r --arg id "$ID" '.patches[$id].version // 0 | . + 1' "$MANIFEST")
-jq --arg id "$ID" --argjson v "$NEW_VERSION" \
+# Semver: unattended re-derivation never changes intent, so PROMOTE
+# always bumps PATCH (MAJOR/MINOR are human-authored with intent changes).
+NEW_VERSION=$(jq -r --arg id "$ID" '(.patches[$id].version // "0.0.0" | tostring | split(".") + ["0","0","0"] | .[0:3] | .[2] = (((.[2] | tonumber?) // 0) + 1 | tostring) | join("."))' "$MANIFEST")
+jq --arg id "$ID" --arg v "$NEW_VERSION" \
   '.patches[$id].version = $v' \
   "$MANIFEST" > "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
@@ -66,7 +68,8 @@ sed -i "1,/^---$/ s/^version: .*/version: $NEW_VERSION/" "$PATCH/INTENT.md"
 sed -i "1,/^---$/ s/^last_realized_against_commit: .*/last_realized_against_commit: $REALIZED_SHA/" "$PATCH/INTENT.md"
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-printf '{"n":%s,"phase":"re-derivation","timestamp":"%s","upstream_tag":"%s","upstream_sha":"%s","approach":"unattended opencode re-derivation, verify gate green","result":"passed","tokens":0,"model":"unattended"}\n' \
-  "$NEW_VERSION" "$NOW" "$TAG" "$REALIZED_SHA" >> "$PATCH/attempts.jsonl"
+ATTEMPT_N=$(($(wc -l < "$PATCH/attempts.jsonl" 2>/dev/null || echo 0) + 1))
+printf '{"n":%s,"phase":"re-derivation","timestamp":"%s","upstream_tag":"%s","upstream_sha":"%s","approach":"unattended opencode re-derivation, verify gate green","result":"passed","tokens":0,"model":"unattended","semver":"%s","change":"patch"}\n' \
+  "$ATTEMPT_N" "$NOW" "$TAG" "$REALIZED_SHA" "$NEW_VERSION" >> "$PATCH/attempts.jsonl"
 
 echo "PROMOTE"
