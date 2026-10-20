@@ -157,28 +157,6 @@ jobs:
           mv "$GITHUB_WORKSPACE/app/release"/*.AppImage "$GITHUB_WORKSPACE/dist/" 2>/dev/null || true
           mv "$GITHUB_WORKSPACE/app/release"/latest-linux.yml "$GITHUB_WORKSPACE/dist/" 2>/dev/null || true
           [ -n "$(ls -A "$GITHUB_WORKSPACE/dist")" ] || { echo "::error::no artifacts packed"; exit 1; }
-          # Descriptive AppImage name (upstream productName is the stealth
-          # name, so the file comes out as coresign*/audiodg-*.AppImage).
-          # Rename + repoint the manifest (hashes/sizes cover content only).
-          for img in "$GITHUB_WORKSPACE"/dist/*.AppImage; do
-            [ -e "$img" ] || continue
-            base=$(basename "$img")
-            case "$base" in
-              Natively-*) echo "AppImage already descriptive: $base"; continue ;;
-            esac
-            case "$base" in
-              *-*) new="Natively-${base#*-}" ;;
-              *) echo "::warning::unexpected AppImage name without version separator: $base"; continue ;;
-            esac
-            echo "renaming AppImage $base -> $new"
-            mv "$img" "$GITHUB_WORKSPACE/dist/$new"
-            if [ -e "$img.blockmap" ]; then
-              mv "$img.blockmap" "$GITHUB_WORKSPACE/dist/$new.blockmap"
-            fi
-            for yml in "$GITHUB_WORKSPACE"/dist/latest-linux.yml; do
-              [ -e "$yml" ] && sed -i "s/$base/$new/g" "$yml"
-            done
-          done
           if [ "${{ matrix.flavor }}" = "full" ]; then
             TAG="v$APP_VERSION"
           else
