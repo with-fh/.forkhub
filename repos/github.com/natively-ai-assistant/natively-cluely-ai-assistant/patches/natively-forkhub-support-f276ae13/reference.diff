@@ -414,10 +414,10 @@ index 9416bec..12c2020 100644
  
    // RAG API
 diff --git a/electron/services/CalendarManager.ts b/electron/services/CalendarManager.ts
-index 507f78a..da2b8bc 100644
+index 507f78a..5e84090 100644
 --- a/electron/services/CalendarManager.ts
 +++ b/electron/services/CalendarManager.ts
-@@ -37,6 +37,84 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
+@@ -37,6 +37,85 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
  const DEFAULT_CALENDAR_CLIENT_ID = '814531619520-80ib40f38i5vdeg0j8kk81r0usojrt9a.apps.googleusercontent.com';
  const DEFAULT_CALENDAR_CLIENT_SECRET = process.env.NATIVELY_BAKED_CALENDAR_CLIENT_SECRET || '';
  
@@ -436,10 +436,11 @@ index 507f78a..da2b8bc 100644
 +/**
 + * Public Desktop OAuth client id for the fork's own Google Cloud project
 + * ("Natively ForkHub"). A client ID is a PUBLIC identifier — it ships in
-+ * every build and appears in auth URLs by design. The PKCE direct flow
-+ * sends no secret unless one was explicitly provisioned (Google accepts
-+ * secretless token calls for this Desktop client type — verified live),
-+ * so there is nothing sensitive here and no per-build provisioning step.
++ * every build and appears in auth URLs by design. Token calls for this
++ * client REQUIRE the provisioned secret (Google 400s secretless calls:
++ * `client_secret is missing`, verified live 2026-10-26), so calendar
++ * needs NATIVELY_GOOGLE_CLIENT_SECRET baked — but the ID itself stays
++ * non-sensitive with no per-build step beyond the secret.
 + */
 +const FORK_DEFAULT_CLIENT_ID =
 +  '303200007953-jsb6cjl3vdev3j0pthdkju8v6hm4q5qv.apps.googleusercontent.com';
@@ -502,7 +503,7 @@ index 507f78a..da2b8bc 100644
  const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
  const TOKEN_URL = 'https://oauth2.googleapis.com/token';
  const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
-@@ -66,13 +144,70 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
+@@ -66,13 +145,65 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
  /** Token-endpoint errors that mean the stored grant is dead and reconnecting is the only fix. */
  const DEAD_GRANT_ERRORS = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client', 'deleted_client']);
  
@@ -533,19 +534,14 @@ index 507f78a..da2b8bc 100644
 +
 +function calendarOAuthClient(): { id: string; secret: string; direct: boolean } {
 +    const { clientId, direct } = resolveCalendarClient();
-+    // Fork-owned client: this is a public Desktop client whose token calls
-+    // carry NO secret. Google's token endpoint accepts secretless PKCE
-+    // code exchanges and refreshes for Desktop clients (verified live:
-+    // a wrong secret returns `invalid_client`, a missing secret returns
-+    // `invalid_request: client_secret is missing.` ONLY when the Cloud
-+    // project's client type REQUIRES one — Desktop clients do not).
-+    // Keeping the flow secretless means a fork build can never ship a
-+    // "not configured" calendar: the client id above is baked into the
-+    // patch (public by design — it appears in auth URLs) and there is no
-+    // second credential to provision, bake, or leak. A baked/env secret,
-+    // when present (older builds, explicit provisioning), is still sent —
-+    // Google accepts the exchange either way for this client type.
-+    // Stock keeps its baked/env secret exactly as before.
++    // Fork-owned client: token calls carry the provisioned secret, which
++    // Google REQUIRES at the token endpoint (verified live 2026-10-26:
++    // secretless exchange → 400 `invalid_request: client_secret is
++    // missing.`; wrong secret → 401 `invalid_client`). A baked/env secret,
++    // when present, is sent; without one the exchange fails and the app
++    // surfaces the honest not-configured copy (never a hang). The client
++    // id itself is baked into the patch (public by design — it appears in
++    // auth URLs). Stock keeps its baked/env secret exactly as before.
 +    if (direct) {
 +        const secret =
 +            readForkGoogleClientSecret() ||
@@ -575,21 +571,22 @@ index 507f78a..da2b8bc 100644
  function base64Url(buf: Buffer): string {
      return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
  }
-@@ -235,8 +370,12 @@ export class CalendarManager extends EventEmitter {
+@@ -235,8 +366,13 @@ export class CalendarManager extends EventEmitter {
          // page that says "OAuth client not found", the user never hits the
          // callback, and the loopback server below leaks.
          if (!client.id) {
 -            throw new Error('Calendar sync is not configured in this build (no Google OAuth client ID).');
 +            throw new Error('Calendar sync is not configured in this build (missing Google client ID).');
          }
-+        // No fail-fast on a missing fork secret: the fork flow is secretless
-+        // (see calendarOAuthClient) — opening the browser is always valid
-+        // when a client id is present. A rejected exchange/refresh still
-+        // surfaces under the button via the callback error path below.
++        // No fail-fast on a missing fork secret: the consent page still
++        // opens when a client id is present, but the code exchange WILL
++        // fail without a provisioned secret (Google 400s secretless calls
++        // for this client) — the callback error path below surfaces the
++        // honest not-configured copy under the button, never a hang.
  
          // PKCE: only this process knows the verifier, so a code intercepted on
          // the way back is useless to anyone else. `state` ties the callback to
-@@ -286,7 +425,13 @@ export class CalendarManager extends EventEmitter {
+@@ -286,7 +422,13 @@ export class CalendarManager extends EventEmitter {
                      respond({ kind: 'connected' });
                      finish(() => resolve());
                  } catch (err) {
@@ -604,14 +601,14 @@ index 507f78a..da2b8bc 100644
                      finish(() => reject(err));
                  }
              });
-@@ -361,7 +506,20 @@ export class CalendarManager extends EventEmitter {
+@@ -361,7 +503,20 @@ export class CalendarManager extends EventEmitter {
      private async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string) {
          const client = calendarOAuthClient();
          try {
 -            const data = await postTokenEndpoint({
 +            // Fork-owned client: exchange straight with Google via the
-+            // pure PKCE helpers, sending the baked fork secret (Google
-+            // requires it even for Desktop clients). Stock path below
++            // pure PKCE helpers, forwarding the provisioned secret
++            // (Google 400s without it — REQUIRED). Stock path below
 +            // untouched.
 +            const data = client.direct
 +                // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -626,13 +623,13 @@ index 507f78a..da2b8bc 100644
                  grant_type: 'authorization_code',
                  code,
                  code_verifier: codeVerifier,
-@@ -440,6 +598,29 @@ export class CalendarManager extends EventEmitter {
+@@ -440,6 +595,29 @@ export class CalendarManager extends EventEmitter {
          }
  
          const client = calendarOAuthClient();
 +        // Fork-owned client: refresh straight with Google via the pure
-+        // PKCE helpers (secretless unless one was provisioned — see
-+        // calendarOAuthClient). Resolved fresh each time so
++        // PKCE helpers (secret forwarded when provisioned — REQUIRED,
++        // Google 400s without it). Resolved fresh each time so
 +        // packaged-vs-dev configuration cannot go stale across restarts.
 +        // Stock path below untouched.
 +        if (client.direct && client.id) {
@@ -941,10 +938,10 @@ index 0000000..d64fdae
 +});
 diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
 new file mode 100644
-index 0000000..b8f7d83
+index 0000000..5e27aec
 --- /dev/null
 +++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,118 @@
 +// electron/services/__tests__/ForkPatch2Sources.test.mjs
 +//
 +// Source assertions for the second ForkHub patch (calendar direct auth,
@@ -977,9 +974,11 @@ index 0000000..b8f7d83
 +  assert.match(src, /refreshTokenDirect/);
 +  // Stock direct-with-upstream-client path preserved (upstream behavior
 +  // when not direct): the committed client, its resolver, and the
-+  // secret-gated token calls are intact. (Upstream v2.9.2 removed the
-+  // natively-api proxy the reference patch was written against, so there
-+  // are no /api/calendar/* call sites left to preserve — see report.)
++  // secret-gated token calls are intact (plus calendar needs the
++  // provisioned secret — secretless token calls 400 at Google, verified
++  // live 2026-10-26). (Upstream v2.9.2 removed the natively-api proxy the
++  // reference patch was written against, so there are no /api/calendar/*
++  // call sites left to preserve — see report.)
 +  assert.match(src, /DEFAULT_CALENDAR_CLIENT_ID/);
 +  assert.match(src, /calendarOAuthClient/);
 +  assert.match(src, /client_secret/);
@@ -991,11 +990,12 @@ index 0000000..b8f7d83
 +  assert.match(src, /apps\.googleusercontent\.com/);
 +  assert.match(src, /isForkCatalogBuild/);
 +  assert.match(src, /UPSTREAM_OWNER/);
-+  // Google requires client_secret even for Desktop clients: the fork
-+  // secret ships baked (never committed) or via env, and is sent on the
-+  // direct path when present; the flow also succeeds secretless for this
-+  // client type, so a build without a provisioned secret still connects.
-+  // Without a usable client id connect fails fast with a named error.
++  // Google requires client_secret at the token endpoint: the fork secret
++  // ships baked (never committed) or via env, and is sent on the direct
++  // path when provisioned — REQUIRED (secretless calls 400, verified
++  // live 2026-10-26). Without a usable client id connect fails fast with
++  // a named error; without the secret the exchange fails at Google and
++  // surfaces the named not-configured copy.
 +  assert.match(src, /readForkGoogleClientSecret/);
 +  assert.match(src, /nativelyGoogleClientSecret/);
 +  assert.match(src, /NATIVELY_GOOGLE_CLIENT_SECRET/);
@@ -1010,9 +1010,8 @@ index 0000000..b8f7d83
 +  assert.match(src, /createPkcePair/);
 +  assert.match(src, /oauth2\.googleapis\.com\/token/);
 +  // Secret is conditional, never unconditional: the key appears only in
-+  // the provided-secret spread (sent when a secret was provisioned; the
-+  // fork flow also succeeds secretless for its Desktop client type, so an
-+  // unprovisioned build still connects instead of failing "not configured").
++  // the provided-secret spread (sent when a secret was provisioned —
++  // REQUIRED, secretless calls 400 at Google for this client).
 +  assert.match(src, /clientSecret/);
 +  assert.match(src, /client_secret: clientSecret/);
 +});
@@ -1250,10 +1249,10 @@ index 0000000..8b5a6fa
 +});
 diff --git a/electron/services/calendarPkce.ts b/electron/services/calendarPkce.ts
 new file mode 100644
-index 0000000..99df124
+index 0000000..eedc1f0
 --- /dev/null
 +++ b/electron/services/calendarPkce.ts
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,119 @@
 +/**
 + * electron/services/calendarPkce.ts
 + *
@@ -1264,10 +1263,10 @@ index 0000000..99df124
 + * proxy, which holds the secret for UPSTREAM's OAuth client. A fork build
 + * can never use that proxy with its own client id (Google binds the code
 + * to the initiating client). The fork therefore exchanges and refreshes
-+ * tokens DIRECTLY with Google — sending the fork OAuth client's own
-+ * secret, which Google requires at the token endpoint even for Desktop
-+ * clients with PKCE (without it Google answers 400 `invalid_request:
-+ * client_secret is missing.`). Per Google's own native-app docs the
++ * tokens DIRECTLY with Google — sending the provisioned fork OAuth
++ * secret, which Google REQUIRES at the token endpoint (without it Google
++ * answers 400 `invalid_request: client_secret is missing` — verified
++ * live 2026-10-26 against this client's id). Per Google's own native-app docs the
 + * secret is not treated as confidential here: it ships baked into the
 + * packaged app (see CalendarManager secret resolution + build.sh), never
 + * committed to source. See CalendarManager for the wiring.
@@ -1327,10 +1326,11 @@ index 0000000..99df124
 +}
 +
 +/**
-+ * Direct code→token exchange. `clientSecret` is sent when provided: Google
-+ * requires it at the token endpoint even for Desktop clients using PKCE
-+ * (absent → 400 `invalid_request: client_secret is missing.`). Omitted
-+ * only when the caller has no secret to send.
++ * Direct code→token exchange. `clientSecret` is REQUIRED and forwarded
++ * when present: Google answers 400 `invalid_request: client_secret is
++ * missing.` without it (verified live 2026-10-26). Omitted only when the
++ * caller has no secret — which fails closed at Google, surfacing the
++ * honest not-configured copy.
 + */
 +export function exchangeCodeDirect(
 +  code: string,
@@ -1702,7 +1702,7 @@ index 0000000..f19298e
 +});
 diff --git a/electron/update/updateFeed.ts b/electron/update/updateFeed.ts
 new file mode 100644
-index 0000000..f2e9b71
+index 0000000..69508d1
 --- /dev/null
 +++ b/electron/update/updateFeed.ts
 @@ -0,0 +1,396 @@
@@ -2904,7 +2904,7 @@ index 5944b31..0c26e15 100644
                          <CommunityActionRow key={title} title={title} body={body} control={action} />
                      ))}
 diff --git a/src/components/SettingsOverlay.tsx b/src/components/SettingsOverlay.tsx
-index e37af56..4b28461 100644
+index e37af56..e245de5 100644
 --- a/src/components/SettingsOverlay.tsx
 +++ b/src/components/SettingsOverlay.tsx
 @@ -797,6 +797,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({

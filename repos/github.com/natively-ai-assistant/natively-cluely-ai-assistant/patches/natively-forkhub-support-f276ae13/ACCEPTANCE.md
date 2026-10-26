@@ -28,11 +28,12 @@ change).
    submodule-less checkout; `trial:start` returns `invalid_hwid`
    without POSTing when no stable id exists (`HardwareId.test.mjs`).
 6. **Fork calendar + checks.** Direct PKCE flow with fork client id
-   (baked, env, or fork default) and NO fail-fast on a missing secret —
-   secretless token calls succeed for this Desktop client type, so an
-   unprovisioned build connects instead of failing "not configured";
-   exactly one terminal state per manual Check; failures render in UI,
-   never silent (`CalendarPkce.test.mjs`, `ForkPatch2Sources.test.mjs`).
+   (baked, env, or fork default) forwarding the provisioned secret —
+   REQUIRED, secretless token calls 400 at Google for this client
+   (verified live 2026-10-26); without the secret the flow fails with
+   the honest not-configured copy, never a hang. Exactly one terminal
+   state per manual Check; failures render in UI, never silent
+   (`CalendarPkce.test.mjs`, `ForkPatch2Sources.test.mjs`).
 7. **Deterministic Linux dock identity.** userData pinned before
    rename, rename before any window (Linux-only), `StartupWMClass`
    contract in build config, guarded postinst hook

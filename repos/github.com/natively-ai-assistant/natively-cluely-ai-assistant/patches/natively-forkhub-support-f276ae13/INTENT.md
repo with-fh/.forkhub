@@ -41,10 +41,11 @@ per software, as the catalog intends.
    proxy holds upstream's secret); manual version Check never shows a
    bare Error for feed problems (answers from the catalog compare);
    Support funds both upstream and the fork maintainer; About credits
-   the fork. The fork flow sends no client secret unless one was
-   explicitly provisioned (Google accepts secretless token calls for
-   this Desktop client type — verified live), so a build with no
-   provisioned secret still connects instead of failing "not configured".
+   the fork. The fork flow sends the provisioned client secret when one
+   exists (Google rejects secretless token calls with 400
+   `client_secret is missing` — verified live 2026-10-26), so calendar
+   needs NATIVELY_GOOGLE_CLIENT_SECRET baked at package time; without it
+   the flow fails with the honest not-configured copy instead of hanging.
 4. **Linux dock identity.** Deterministic WM_CLASS / desktop-entry
    contract so the dock shows the icon and offers pin-to-dock.
 5. **Linux system-audio capture.** The native speaker module gains a
@@ -102,12 +103,13 @@ catalog and resources, visibly separated from stock.
 7. **Exactly one terminal state per Check.** Updater failures surface
    both as a rejected promise AND an async `error` event — one fallback
    run guaranteed; download-time errors still broadcast as before.
-8. **Secret optional, never committed.** A fork OAuth client secret,
-   when provisioned, arrives only via `build.extraMetadata` (stamped at
+8. **Secret required for calendar, never committed.** The fork OAuth
+   client secret arrives only via `build.extraMetadata` (stamped at
    package time) or env, is never logged, and never appears in source.
-   Provisioning is optional: unprovisioned builds connect secretless
-   (Desktop client type), never failing "not configured" for a missing
-   secret — only a missing client id refuses.
+   Calendar REQUIRES it baked: without it Google answers 400
+   `client_secret is missing` (verified live), and the app surfaces the
+   honest "Calendar isn't set up for this build yet" copy. Add
+   NATIVELY_GOOGLE_CLIENT_SECRET in repo Settings → Secrets.
 9. **No silent UI dead-ends.** Calendar failures render under the
    button; manual compare with no reachable feed broadcasts instead of
    hanging; manual-download fallback never 404s (catalog release page
@@ -132,11 +134,12 @@ catalog and resources, visibly separated from stock.
   fallback for manual Checks; Linux-only userData pin + rename.
 - `electron/services/HardwareId.ts` (new): ordered HWID resolution.
 - `electron/services/calendarPkce.ts` (new): direct PKCE exchange /
-  refresh (secret sent only when provisioned); `CalendarManager`
-  fork-id resolution (baked extraMetadata → direct, env + flag →
-  direct, fork default id → direct) with no fail-fast on a missing
-  secret — Connect always opens the browser when a client id exists.
-  Exchange/refresh failures keep their readable error under the button.
+  refresh (secret forwarded when provisioned — REQUIRED, Google 400s
+  without it); `CalendarManager` fork-id resolution (baked
+  extraMetadata → direct, env + flag → direct, fork default id →
+  direct). Connect opens the browser when a client id exists; a missing
+  or rejected secret surfaces the named not-configured error under the
+  button via the callback error path, never a hang.
 - `native-module/src/speaker/linux.rs` (new): PulseAudio/PipeWire
   monitor backend (`pulse`); `mod.rs` owns it on
   `#[cfg(target_os = "linux")]`, fallback stub covers remaining
