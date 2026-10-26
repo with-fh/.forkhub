@@ -399,7 +399,7 @@ jobs:
           {
             echo "# $TAG"
             echo
-            echo "Patched build of `${{ matrix.pair.target }}` @ `$UP` + intent stack."
+            echo "Patched build of \`${{ matrix.pair.target }}\` @ \`$UP\` + intent stack."
             if [ -f "repos/${{ matrix.pair.target }}/build/CONSUME.md" ]; then
               echo
               cat "repos/${{ matrix.pair.target }}/build/CONSUME.md"
