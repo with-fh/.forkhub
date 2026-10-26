@@ -9,7 +9,7 @@
   "on_budget_exceed": "pause",
   "patches": {
     "natively-forkhub-support-f276ae13": {
-      "status": "draft",
+      "status": "applied",
       "version": "1.1.0",
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",

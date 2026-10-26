@@ -6,11 +6,17 @@ everything, then it self-updates from here.
 
 ## Install
 
-- **Linux:** the `natively_*_amd64.deb` below (recommended — registers
-  with the desktop so the dock shows the icon and offers pin-to-dock),
-  or the `Natively-*-x86_64.AppImage` (`chmod +x`, then run; an AppImage
-  run directly has no registered desktop entry, so durable pinning needs
-  the `.deb`).
+- **Linux:** the `natively_*_amd64.deb` below (recommended — installs a
+  system-wide desktop entry + icon, so the dock shows the app and offers
+  pin-to-dock), or the `Natively-*-x86_64.AppImage` (`chmod +x`, then run).
+  The AppImage carries the same `StartupWMClass` contract, so with
+  [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher)
+  (or `appimaged`) it integrates too — one click moves it to
+  `~/Applications` and registers the desktop entry, with dock
+  pinning working the same way. A bare `chmod +x` + run with no
+  integration daemon is the only setup with no registered entry.
+  Either way the in-app updater (Settings → Version → Check) self-updates
+  the AppImage in place; the `.deb` additionally updates through apt.
 - **macOS (unsigned):** the `Natively-*-arm64.dmg` (Apple Silicon) or
   `Natively-*-x64.dmg` (Intel). First launch: right-click → Open (the
   fork carries no Developer ID signature, so Gatekeeper blocks a plain

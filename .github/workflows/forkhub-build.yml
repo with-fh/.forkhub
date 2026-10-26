@@ -325,9 +325,14 @@ jobs:
           # Per-target secret forwarding (sanctioned pattern — keep this list
           # minimal and documented): build.sh scripts read these at package
           # time. Absent secret = empty env = the target's unconfigured path.
-          # Natively calendar direct flow: Google OAuth client secret, baked
-          # into extraMetadata (never logged by build.sh). Add the value in
-          # repo Settings → Secrets; the name alone is safe to keep here.
+          # Natively calendar direct flow: Google OAuth client id (public,
+          # baked into extraMetadata) + client secret (optional since
+          # v1.1.0 — fork Desktop client connects secretless; baked only
+          # when provisioned, never logged by build.sh). Add the values in
+          # repo Settings → Secrets (CLIENT_ID as a secret for uniformity,
+          # or set NATIVELY_GOOGLE_CLIENT_ID as a variable); the names alone
+          # are safe to keep here.
+          NATIVELY_GOOGLE_CLIENT_ID: ${{ secrets.NATIVELY_GOOGLE_CLIENT_ID }}
           NATIVELY_GOOGLE_CLIENT_SECRET: ${{ secrets.NATIVELY_GOOGLE_CLIENT_SECRET }}
           # Target slug for per-target bundle numbering (see build.sh).
           FORKHUB_TARGET: ${{ matrix.pair.target }}

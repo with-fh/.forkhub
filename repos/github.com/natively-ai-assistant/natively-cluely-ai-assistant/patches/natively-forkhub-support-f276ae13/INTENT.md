@@ -3,7 +3,7 @@ id: natively-forkhub-support-f276ae13
 title: Natively ForkHub support (catalog update feed + publisher input + calendar + dock + linux audio)
 target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
 target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/__tests__/LinuxSystemAudio.test.mjs, electron/services/resolveCompanySearchProvider.ts, native-module/Cargo.toml, native-module/Cargo.lock, native-module/src/speaker/linux.rs, native-module/src/speaker/mod.rs, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
-status: draft
+status: applied
 applied_upstream_pr: none
 version: 1.1.0
 license: MIT

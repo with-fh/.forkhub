@@ -231,21 +231,21 @@ else
 fi
 
 # --- bake the fork's Google OAuth client secret (calendar direct flow) ---
-# Google requires client_secret at the token endpoint even for Desktop
-# clients using PKCE (absent → 400 `invalid_request: client_secret is
-# missing.`), and per Google's own native-app docs the secret is NOT
+# Optional since v1.1.0: the fork's Desktop client type accepts secretless
+# PKCE token calls (verified live), so unprovisioned builds connect WITHOUT
+# a secret. A provisioned secret is still sent when present (older builds,
+# explicit provisioning). Per Google's own native-app docs the secret is NOT
 # treated as confidential here — but it is still never logged and never
 # committed: it arrives only via env (CI secret or local shell) and is
-# baked into the packaged app. Absent: calendar connect fails fast with a
-# clear not-configured error instead of wasting a consent round-trip.
-# (CI can only see this var if the shared workflow forwards it; the repo
-# secret itself is added in GitHub Settings. See build/BUILD.md.)
+# baked into the packaged app. (CI can only see this var if the shared
+# workflow forwards it; the repo secret itself is added in GitHub Settings.
+# See build/BUILD.md.)
 if [ -n "${NATIVELY_GOOGLE_CLIENT_SECRET:-}" ]; then
   say "baking fork Google client secret (value never logged)"
   npm pkg set "build.extraMetadata.nativelyGoogleClientSecret=$NATIVELY_GOOGLE_CLIENT_SECRET" >>"$LOG" 2>&1 \
     || fail_soft "client secret stamp failed"
 else
-  say "no NATIVELY_GOOGLE_CLIENT_SECRET — calendar direct flow will report not-configured at connect time"
+  say "no NATIVELY_GOOGLE_CLIENT_SECRET — calendar connects secretless (fork Desktop client needs no secret)"
 fi
 
 # --- deb maintainer (electron-builder requires an author email for the

@@ -1937,7 +1937,7 @@ index 0000000..f2e9b71
 +    owner: norm,
 +    repo,
 +    releases: usable,
-+    message: `Updating from ${norm}/${repo} releases.`,
++    message: `Getting updates from ${norm}/${repo} (${usable} release${usable === 1 ? '' : 's'} in the catalog).`,
 +  };
 +}
 +
@@ -2984,7 +2984,7 @@ index e37af56..4b28461 100644
 +                                                            <h3 className="text-sm font-bold text-text-primary">{t('ForkHub publisher')}</h3>
 +                                                            <p className="text-xs text-text-secondary mt-0.5">
 +                                                                {publisherFeed
-+                                                                    ? t('Updating from releases.')
++                                                                    ? t('Now updating from this publisher\u2019s releases.')
 +                                                                    : t('Profile or org whose .forkhub releases this app updates from.')}
 +                                                            </p>
 +                                                            {publisherFeed && (
@@ -2994,7 +2994,7 @@ index e37af56..4b28461 100644
 +                                                            )}
 +                                                            {publisherCheck.status === 'valid' ? (
 +                                                                <p className="text-xs text-green-400 mt-0.5">
-+                                                                    {t('Publisher connected — catalog releases:')} {publisherCheck.releases}
++                                                                    {t('Connected — updates come from')} {publisherFeed.owner}/{publisherFeed.repo} {t('(releases in catalog:')} {publisherCheck.releases}{t(')')}
 +                                                                </p>
 +                                                            ) : publisherCheck.status === 'invalid' ? (
 +                                                                <p className="text-xs text-red-400 mt-0.5" role="alert">
