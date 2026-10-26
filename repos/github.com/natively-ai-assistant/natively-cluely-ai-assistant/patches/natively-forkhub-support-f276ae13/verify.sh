@@ -6,4 +6,4 @@
 test -d node_modules || npm install --ignore-scripts
 node node_modules/electron/install.js
 npm run build:electron
-node --test electron/update/updateFeed.test.mjs electron/update/ReleaseNotesManager.test.mjs electron/services/__tests__/HardwareId.test.mjs electron/services/__tests__/CalendarPkce.test.mjs electron/services/__tests__/ForkPatch2Sources.test.mjs electron/services/__tests__/LinuxDockAssociation.test.mjs electron/update/updatePublisher.test.mjs
+node --test electron/update/updateFeed.test.mjs electron/update/ReleaseNotesManager.test.mjs electron/services/__tests__/HardwareId.test.mjs electron/services/__tests__/CalendarPkce.test.mjs electron/services/__tests__/ForkPatch2Sources.test.mjs electron/services/__tests__/LinuxDockAssociation.test.mjs electron/services/__tests__/LinuxSystemAudio.test.mjs electron/update/updatePublisher.test.mjs

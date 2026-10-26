@@ -28,16 +28,23 @@ change).
    submodule-less checkout; `trial:start` returns `invalid_hwid`
    without POSTing when no stable id exists (`HardwareId.test.mjs`).
 6. **Fork calendar + checks.** Direct PKCE flow with fork client id
-   (baked or env), byte-identical proxy otherwise; exactly one terminal
-   state per manual Check; failures render in UI, never silent
-   (`CalendarPkce.test.mjs`, `ForkPatch2Sources.test.mjs`).
+   (baked, env, or fork default) and NO fail-fast on a missing secret —
+   secretless token calls succeed for this Desktop client type, so an
+   unprovisioned build connects instead of failing "not configured";
+   exactly one terminal state per manual Check; failures render in UI,
+   never silent (`CalendarPkce.test.mjs`, `ForkPatch2Sources.test.mjs`).
 7. **Deterministic Linux dock identity.** userData pinned before
    rename, rename before any window (Linux-only), `StartupWMClass`
    contract in build config, guarded postinst hook
    (`LinuxDockAssociation.test.mjs`).
 8. **No raw codes / no 404 fallbacks.** Friendly trial copy, catalog
    release-page fallback on fork feeds.
-9. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
+9. **Linux system audio captures.** `pulse` backend owns
+   `#[cfg(target_os = "linux")]`; `SpeakerInput::new` succeeds, stream
+   opens the default monitor, `backend_name() == "pulse"`, fallback stub
+   no longer claims Linux unsupported (`LinuxSystemAudio.test.mjs` +
+   `cargo test speaker::linux`).
+10. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
 
 ## How to verify
 
