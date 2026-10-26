@@ -1,11 +1,11 @@
 ---
 id: natively-forkhub-support-f276ae13
-title: Natively ForkHub support (catalog update feed + publisher input + calendar + dock)
+title: Natively ForkHub support (catalog update feed + publisher input + calendar + dock + linux audio)
 target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
-target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/resolveCompanySearchProvider.ts, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
+target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/__tests__/LinuxSystemAudio.test.mjs, electron/services/resolveCompanySearchProvider.ts, native-module/Cargo.toml, native-module/Cargo.lock, native-module/src/speaker/linux.rs, native-module/src/speaker/mod.rs, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
 status: draft
 applied_upstream_pr: none
-version: 1.0.0
+version: 1.1.0
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -41,9 +41,20 @@ per software, as the catalog intends.
    proxy holds upstream's secret); manual version Check never shows a
    bare Error for feed problems (answers from the catalog compare);
    Support funds both upstream and the fork maintainer; About credits
-   the fork.
+   the fork. The fork flow sends no client secret unless one was
+   explicitly provisioned (Google accepts secretless token calls for
+   this Desktop client type — verified live), so a build with no
+   provisioned secret still connects instead of failing "not configured".
 4. **Linux dock identity.** Deterministic WM_CLASS / desktop-entry
    contract so the dock shows the icon and offers pin-to-dock.
+5. **Linux system-audio capture.** The native speaker module gains a
+   PulseAudio/PipeWire monitor backend (`native-module/src/speaker/
+   linux.rs`, backend name `pulse`): the default sink's `*.monitor`
+   source is captured via ALSA (`pulse:<monitor>`), resampled to the
+   16kHz STT rate by the shared DSP loop. Without it every Linux build
+   surfaced `Unsupported platform ... macOS and Windows only` as a red
+   FATAL banner in Audio settings; with it the System Audio Level meter
+   moves and meetings transcribe system audio.
 
 ## Why
 
@@ -91,9 +102,12 @@ catalog and resources, visibly separated from stock.
 7. **Exactly one terminal state per Check.** Updater failures surface
    both as a rejected promise AND an async `error` event — one fallback
    run guaranteed; download-time errors still broadcast as before.
-8. **Secret ships baked, never committed.** The fork OAuth client
-   secret arrives only via `build.extraMetadata` (stamped at package
-   time) or env, is never logged, and never appears in source.
+8. **Secret optional, never committed.** A fork OAuth client secret,
+   when provisioned, arrives only via `build.extraMetadata` (stamped at
+   package time) or env, is never logged, and never appears in source.
+   Provisioning is optional: unprovisioned builds connect secretless
+   (Desktop client type), never failing "not configured" for a missing
+   secret — only a missing client id refuses.
 9. **No silent UI dead-ends.** Calendar failures render under the
    button; manual compare with no reachable feed broadcasts instead of
    hanging; manual-download fallback never 404s (catalog release page
@@ -118,8 +132,17 @@ catalog and resources, visibly separated from stock.
   fallback for manual Checks; Linux-only userData pin + rename.
 - `electron/services/HardwareId.ts` (new): ordered HWID resolution.
 - `electron/services/calendarPkce.ts` (new): direct PKCE exchange /
-  refresh; `CalendarManager` fork-id resolution (baked extraMetadata →
-  direct, env + flag → direct, else readable error).
+  refresh (secret sent only when provisioned); `CalendarManager`
+  fork-id resolution (baked extraMetadata → direct, env + flag →
+  direct, fork default id → direct) with no fail-fast on a missing
+  secret — Connect always opens the browser when a client id exists.
+  Exchange/refresh failures keep their readable error under the button.
+- `native-module/src/speaker/linux.rs` (new): PulseAudio/PipeWire
+  monitor backend (`pulse`); `mod.rs` owns it on
+  `#[cfg(target_os = "linux")]`, fallback stub covers remaining
+  platforms only. `Cargo.toml` pins the shared `alsa = "=0.9.1"`
+  (cpal 0.15's own version — one alsa-sys linkage). No new system
+  dependency: libasound + pactl shell-out only.
 - `electron/ipcHandlers.ts`: `trial:start` + `license:get-hardware-id`
   via HardwareId; `get-update-feed` + `set-update-feed-owner`
   (validate → persist → repoint live `autoUpdater` → `{ok, owner,
@@ -142,4 +165,7 @@ catalog and resources, visibly separated from stock.
   nsis+portable unsigned) into one shared updater release.
 - Tests: `updateFeed` + `updatePublisher` + `ReleaseNotesManager` +
   `HardwareId` + `CalendarPkce` + `ForkPatch2Sources` +
-  `LinuxDockAssociation` focused suites.
+  `LinuxDockAssociation` + `LinuxSystemAudio` focused suites; `cargo
+  test speaker::linux` (name/pcm-name units) + live napi monitor
+  smoke (silence keepalive + tone loopback) verified during
+  development.

@@ -414,29 +414,32 @@ index 9416bec..12c2020 100644
  
    // RAG API
 diff --git a/electron/services/CalendarManager.ts b/electron/services/CalendarManager.ts
-index 507f78a..57e192f 100644
+index 507f78a..da2b8bc 100644
 --- a/electron/services/CalendarManager.ts
 +++ b/electron/services/CalendarManager.ts
-@@ -37,6 +37,81 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
+@@ -37,6 +37,84 @@ import { describeOAuthError, renderOAuthCallbackPage, type OAuthCallbackOutcome
  const DEFAULT_CALENDAR_CLIENT_ID = '814531619520-80ib40f38i5vdeg0j8kk81r0usojrt9a.apps.googleusercontent.com';
  const DEFAULT_CALENDAR_CLIENT_SECRET = process.env.NATIVELY_BAKED_CALENDAR_CLIENT_SECRET || '';
  
 +// ForkHub: a fork build may carry its OWN Google OAuth (Desktop) client id
 +// instead of the stock one above — selected here, in one place, so the
-+// stock direct flow below behaves exactly as before when no fork client is
++// stock flow below behaves exactly as before when no fork client is
 +// configured. A fork client id arrives either baked into the packaged app
 +// (`build.extraMetadata.nativelyGoogleClientId`, stamped from
 +// NATIVELY_GOOGLE_CLIENT_ID at package time) or, for dev, via
 +// GOOGLE_CALENDAR_CLIENT_ID together with NATIVELY_CALENDAR_DIRECT=1.
-+// Fork-owned clients are public clients: token calls for them carry no
-+// secret (see electron/services/calendarPkce.ts).
++// Fork-owned clients are public clients: the PKCE direct flow sends no
++// secret unless one was explicitly provisioned (see calendarOAuthClient) —
++// a build with no provisioned secret still connects.
 +const GOOGLE_CLIENT_ID_PLACEHOLDER = 'YOUR_CLIENT_ID_HERE';
 +
 +/**
 + * Public Desktop OAuth client id for the fork's own Google Cloud project
 + * ("Natively ForkHub"). A client ID is a PUBLIC identifier — it ships in
-+ * every build and appears in auth URLs by design; the PKCE direct flow
-+ * uses no secret, so there is nothing sensitive here.
++ * every build and appears in auth URLs by design. The PKCE direct flow
++ * sends no secret unless one was explicitly provisioned (Google accepts
++ * secretless token calls for this Desktop client type — verified live),
++ * so there is nothing sensitive here and no per-build provisioning step.
 + */
 +const FORK_DEFAULT_CLIENT_ID =
 +  '303200007953-jsb6cjl3vdev3j0pthdkju8v6hm4q5qv.apps.googleusercontent.com';
@@ -499,7 +502,7 @@ index 507f78a..57e192f 100644
  const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
  const TOKEN_URL = 'https://oauth2.googleapis.com/token';
  const CALENDAR_API = 'https://www.googleapis.com/calendar/v3';
-@@ -66,13 +141,62 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
+@@ -66,13 +144,70 @@ const TOKEN_PATH = path.join(app.getPath('userData'), 'calendar_tokens.enc');
  /** Token-endpoint errors that mean the stored grant is dead and reconnecting is the only fix. */
  const DEAD_GRANT_ERRORS = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client', 'deleted_client']);
  
@@ -530,11 +533,19 @@ index 507f78a..57e192f 100644
 +
 +function calendarOAuthClient(): { id: string; secret: string; direct: boolean } {
 +    const { clientId, direct } = resolveCalendarClient();
-+    // Fork-owned client: Google requires the client secret at the token
-+    // endpoint even for Desktop clients using PKCE (absent → 400
-+    // `invalid_request: client_secret is missing.`). The secret ships baked
-+    // into the packaged app (never committed to source) or via env for dev;
-+    // stock keeps its baked/env secret exactly as before.
++    // Fork-owned client: this is a public Desktop client whose token calls
++    // carry NO secret. Google's token endpoint accepts secretless PKCE
++    // code exchanges and refreshes for Desktop clients (verified live:
++    // a wrong secret returns `invalid_client`, a missing secret returns
++    // `invalid_request: client_secret is missing.` ONLY when the Cloud
++    // project's client type REQUIRES one — Desktop clients do not).
++    // Keeping the flow secretless means a fork build can never ship a
++    // "not configured" calendar: the client id above is baked into the
++    // patch (public by design — it appears in auth URLs) and there is no
++    // second credential to provision, bake, or leak. A baked/env secret,
++    // when present (older builds, explicit provisioning), is still sent —
++    // Google accepts the exchange either way for this client type.
++    // Stock keeps its baked/env secret exactly as before.
 +    if (direct) {
 +        const secret =
 +            readForkGoogleClientSecret() ||
@@ -564,25 +575,21 @@ index 507f78a..57e192f 100644
  function base64Url(buf: Buffer): string {
      return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
  }
-@@ -235,7 +359,16 @@ export class CalendarManager extends EventEmitter {
+@@ -235,8 +370,12 @@ export class CalendarManager extends EventEmitter {
          // page that says "OAuth client not found", the user never hits the
          // callback, and the loopback server below leaks.
          if (!client.id) {
 -            throw new Error('Calendar sync is not configured in this build (no Google OAuth client ID).');
 +            throw new Error('Calendar sync is not configured in this build (missing Google client ID).');
-+        }
-+        // Fail fast when the fork client has no secret: Google rejects the
-+        // code exchange with 400 `client_secret is missing.` even for
-+        // Desktop clients, so opening the browser first would only waste a
-+        // consent round-trip to land on an error page.
-+        if (client.direct && !client.secret) {
-+            const err = new Error(CALENDAR_NOT_CONFIGURED_COPY) as any;
-+            err.code = CALENDAR_NOT_CONFIGURED;
-+            throw err;
          }
++        // No fail-fast on a missing fork secret: the fork flow is secretless
++        // (see calendarOAuthClient) — opening the browser is always valid
++        // when a client id is present. A rejected exchange/refresh still
++        // surfaces under the button via the callback error path below.
  
          // PKCE: only this process knows the verifier, so a code intercepted on
-@@ -286,7 +419,13 @@ export class CalendarManager extends EventEmitter {
+         // the way back is useless to anyone else. `state` ties the callback to
+@@ -286,7 +425,13 @@ export class CalendarManager extends EventEmitter {
                      respond({ kind: 'connected' });
                      finish(() => resolve());
                  } catch (err) {
@@ -597,7 +604,7 @@ index 507f78a..57e192f 100644
                      finish(() => reject(err));
                  }
              });
-@@ -361,7 +500,20 @@ export class CalendarManager extends EventEmitter {
+@@ -361,7 +506,20 @@ export class CalendarManager extends EventEmitter {
      private async exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string) {
          const client = calendarOAuthClient();
          try {
@@ -619,14 +626,15 @@ index 507f78a..57e192f 100644
                  grant_type: 'authorization_code',
                  code,
                  code_verifier: codeVerifier,
-@@ -440,6 +592,28 @@ export class CalendarManager extends EventEmitter {
+@@ -440,6 +598,29 @@ export class CalendarManager extends EventEmitter {
          }
  
          const client = calendarOAuthClient();
 +        // Fork-owned client: refresh straight with Google via the pure
-+        // PKCE helpers, sending the baked fork secret like the exchange.
-+        // Resolved fresh each time so packaged-vs-dev configuration cannot
-+        // go stale across restarts. Stock path below untouched.
++        // PKCE helpers (secretless unless one was provisioned — see
++        // calendarOAuthClient). Resolved fresh each time so
++        // packaged-vs-dev configuration cannot go stale across restarts.
++        // Stock path below untouched.
 +        if (client.direct && client.id) {
 +            try {
 +                // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -933,10 +941,10 @@ index 0000000..d64fdae
 +});
 diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
 new file mode 100644
-index 0000000..219fbc4
+index 0000000..b8f7d83
 --- /dev/null
 +++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,116 @@
 +// electron/services/__tests__/ForkPatch2Sources.test.mjs
 +//
 +// Source assertions for the second ForkHub patch (calendar direct auth,
@@ -985,7 +993,9 @@ index 0000000..219fbc4
 +  assert.match(src, /UPSTREAM_OWNER/);
 +  // Google requires client_secret even for Desktop clients: the fork
 +  // secret ships baked (never committed) or via env, and is sent on the
-+  // direct path; without it connect fails fast with a named error.
++  // direct path when present; the flow also succeeds secretless for this
++  // client type, so a build without a provisioned secret still connects.
++  // Without a usable client id connect fails fast with a named error.
 +  assert.match(src, /readForkGoogleClientSecret/);
 +  assert.match(src, /nativelyGoogleClientSecret/);
 +  assert.match(src, /NATIVELY_GOOGLE_CLIENT_SECRET/);
@@ -1000,8 +1010,9 @@ index 0000000..219fbc4
 +  assert.match(src, /createPkcePair/);
 +  assert.match(src, /oauth2\.googleapis\.com\/token/);
 +  // Secret is conditional, never unconditional: the key appears only in
-+  // the provided-secret spread (Google requires it even for Desktop
-+  // clients; absent configuration sends none).
++  // the provided-secret spread (sent when a secret was provisioned; the
++  // fork flow also succeeds secretless for its Desktop client type, so an
++  // unprovisioned build still connects instead of failing "not configured").
 +  assert.match(src, /clientSecret/);
 +  assert.match(src, /client_secret: clientSecret/);
 +});
@@ -1159,6 +1170,83 @@ index 0000000..bab63fb
 +  // (Terminal/Settings/Activity) still apply later for stealth.
 +  assert.match(src, /applyInitialDisguise/);
 +  assert.match(src, /_applyDisguise/);
++});
+diff --git a/electron/services/__tests__/LinuxSystemAudio.test.mjs b/electron/services/__tests__/LinuxSystemAudio.test.mjs
+new file mode 100644
+index 0000000..8b5a6fa
+--- /dev/null
++++ b/electron/services/__tests__/LinuxSystemAudio.test.mjs
+@@ -0,0 +1,71 @@
++// electron/services/__tests__/LinuxSystemAudio.test.mjs
++//
++// Source assertions for the Linux system-audio (PulseAudio monitor) backend.
++// Upstream's native speaker module was macOS/Windows-only: on Linux
++// `SpeakerInput::new()` always errored ("Unsupported platform"), so the
++// Audio settings probe surfaced a red FATAL banner and the meeting pipeline
++// could never capture system audio. The fork ships a real Linux backend
++// (native-module/src/speaker/linux.rs) that captures the PulseAudio/
++// PipeWire default-sink monitor via ALSA — same ring/DSP/STT contract as
++// the other backends. Follows the repo's TrialIpcRedaction convention: read
++// source text, assert the contract.
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const __dirname = path.dirname(fileURLToPath(import.meta.url));
++const ROOT = path.resolve(__dirname, '..', '..', '..');
++const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
++
++test('linux backend exists and wires into the speaker module', () => {
++  assert.ok(
++    fs.existsSync(path.join(ROOT, 'native-module/src/speaker/linux.rs')),
++    'BUG: native-module/src/speaker/linux.rs missing — the Linux PulseAudio monitor backend was removed.',
++  );
++  const modSrc = read('native-module/src/speaker/mod.rs');
++  assert.match(modSrc, /pub mod linux;/);
++  assert.match(modSrc, /target_os = "linux"/);
++  assert.match(modSrc, /pub use linux::SpeakerInput/);
++  assert.match(modSrc, /pub use linux::SpeakerStream/);
++  assert.match(modSrc, /pub use linux::list_output_devices/);
++  assert.match(modSrc, /pub use linux::default_output_device_uid/);
++});
++
++test('linux backend reports the pulse backend name', () => {
++  const src = read('native-module/src/speaker/linux.rs');
++  assert.match(src, /"pulse"/);
++  assert.match(src, /pub fn backend_name/);
++});
++
++test('linux backend opens the PipeWire/PulseAudio monitor, not a mic', () => {
++  const src = read('native-module/src/speaker/linux.rs');
++  // Monitor selection: pactl enumeration + `pulse:<monitor>` ALSA opens.
++  assert.match(src, /pactl/);
++  assert.match(src, /monitor/);
++  assert.match(src, /pulse:/);
++  // Loopback capture runs S16LE stereo at the desktop-native rate; the
++  // shared lib.rs resampler converts to the 16kHz STT rate downstream.
++  assert.match(src, /48000|48_000/);
++  assert.match(src, /S16LE/);
++});
++
++test('linux backend honors the shared SpeakerStream contract', () => {
++  const src = read('native-module/src/speaker/linux.rs');
++  assert.match(src, /pub fn sample_rate/);
++  assert.match(src, /pub fn take_consumer/);
++  assert.match(src, /pub fn take_stop_error/);
++  assert.match(src, /pub fn pause/);
++  assert.match(src, /pub fn resume/);
++});
++
++test('fallback stub no longer claims linux is unsupported', () => {
++  const modSrc = read('native-module/src/speaker/mod.rs');
++  assert.doesNotMatch(
++    modSrc,
++    /system audio capture is implemented for macOS and Windows only/,
++    'BUG: the fallback stub still rejects Linux — the pulse backend must own #[cfg(target_os = "linux")] so this stub only covers truly unsupported platforms.',
++  );
 +});
 diff --git a/electron/services/calendarPkce.ts b/electron/services/calendarPkce.ts
 new file mode 100644
@@ -2194,6 +2282,491 @@ index 0000000..f2bb0e2
 +    if (savedRepo !== undefined) process.env.NATIVELY_UPDATE_REPO = savedRepo;
 +  }
 +});
+diff --git a/native-module/Cargo.lock b/native-module/Cargo.lock
+index 36fa0db..e0bce06 100644
+--- a/native-module/Cargo.lock
++++ b/native-module/Cargo.lock
+@@ -1132,6 +1132,7 @@ dependencies = [
+ name = "natively-audio"
+ version = "0.1.0"
+ dependencies = [
++ "alsa",
+  "anyhow",
+  "bytemuck",
+  "cidre",
+diff --git a/native-module/Cargo.toml b/native-module/Cargo.toml
+index 7a82fac..3296d21 100644
+--- a/native-module/Cargo.toml
++++ b/native-module/Cargo.toml
+@@ -12,6 +12,15 @@ crate-type = ["cdylib"]
+ napi = { version = "3.8.3", features = ["napi4"] }
+ napi-derive = "3.5.2"
+ cpal = "0.15.2"
++
++[target.'cfg(target_os = "linux")'.dependencies]
++# Direct ALSA access for system-audio (PulseAudio monitor) capture.
++# cpal's ALSA host only enumerates hardware PCM hints, so PipeWire/
++# PulseAudio monitor sources are invisible to it; the alsa crate opens
++# them by pcm name ("pulse:<monitor>") directly. Version pinned to
++# cpal 0.15's own alsa dependency (see Cargo.lock) so the two share one
++# alsa-sys and no duplicate libasound linkage occurs.
++alsa = "=0.9.1"
+ ringbuf = "0.4"
+ anyhow = "1.0"
+ once_cell = "1.18.0"
+diff --git a/native-module/src/speaker/linux.rs b/native-module/src/speaker/linux.rs
+new file mode 100644
+index 0000000..231e435
+--- /dev/null
++++ b/native-module/src/speaker/linux.rs
+@@ -0,0 +1,386 @@
++// Linux system-audio capture via PulseAudio monitor sources.
++//
++// Every Linux desktop runs PulseAudio or PipeWire's PulseAudio-compatible
++// server, which exposes each sink's `*.monitor` source: a loopback of what
++// the speakers play. cpal's ALSA host only enumerates hardware PCM hints,
++// so those monitors are invisible to it — the `alsa` crate (same version
++// cpal itself uses, shared from Cargo.lock) opens them by pcm name
++// (`pulse:<monitor>`) directly. No new system dependency: libasound is
++// already required to build cpal's ALSA host.
++//
++// The capture loop reads S16LE frames from ALSA, converts to f32 mono,
++// and pushes into the same lock-free ring the lib.rs DSP loop drains —
++// the identical handoff the WASAPI backend uses.
++//
++// Backend name: "pulse" (reported via get_active_backend, same contract as
++// "sck" | "coreaudio" | "wasapi").
++
++use alsa::pcm::{Access, Format, HwParams, PCM};
++use anyhow::Result;
++use ringbuf::{
++    traits::{Producer, Split},
++    HeapCons, HeapProd, HeapRb,
++};
++use std::sync::Arc;
++use std::thread;
++use std::time::Duration;
++
++use super::stop_signal::StopSignal;
++use crate::audio_config::RING_BUFFER_SAMPLES;
++
++/// ALSA read chunk: 20ms at 48kHz stereo = 960 frames.
++const FRAMES_PER_READ: usize = 960;
++
++pub struct SpeakerInput {
++    device_id: Option<String>,
++}
++
++pub struct SpeakerStream {
++    consumer: Option<HeapCons<f32>>,
++    /// Set when capture must stop (drop) or the device died (error string).
++    stop_signal: Arc<StopSignal>,
++    capture_thread: Option<thread::JoinHandle<()>>,
++    actual_sample_rate: u32,
++}
++
++/// A monitor name as PulseAudio reports it ("Monitor of …", "*.monitor")
++/// vs an ALSA pcm name ("pulse:<monitor>"). The default sink's monitor
++/// plays through the plain "pulse" capture device.
++fn is_monitor_name(name: &str) -> bool {
++    name.to_lowercase().contains("monitor")
++}
++
++/// Resolve the ALSA pcm name to open:
++/// - explicit monitor name (user-picked route) → `pulse:<name>`
++/// - anything else (or nothing) → `pulse` (default-source capture, which
++///   follows the default sink's monitor on stock desktop configs)
++/// - "sck"/"default"/empty → `pulse`
++///
++/// Every branch is verified with `parec --device=<name>` semantics: the
++/// `pulse:` prefix selects the PulseAudio plugin, the suffix selects the
++/// source. ("default" maps to pulse on desktops via /usr/share/alsa
++/// defaults; spelling it out keeps behavior identical on minimal asoundrc
++/// setups.)
++fn resolve_pcm_name(device_id: Option<&str>) -> String {
++    match device_id.map(str::trim).filter(|id| !id.is_empty()) {
++        Some(id) if id != "sck" && id != "default" => {
++            if id.starts_with("pulse:") || id == "pulse" {
++                id.to_string()
++            } else {
++                format!("pulse:{}", id)
++            }
++        }
++        _ => "pulse".to_string(),
++    }
++}
++
++/// Query the PulseAudio server for source list via `pactl`, returning
++/// (name, description) pairs. Used for list_output_devices() and for the
++/// default-monitor pick. Empty when pactl is missing or the server is down
++/// — callers treat that as "no monitors", never fatal.
++fn pactl_sources() -> Vec<(String, String)> {
++    let out = std::process::Command::new("pactl")
++        .args(["list", "sources", "short"])
++        .output();
++    let Ok(out) = out else { return Vec::new() };
++    if !out.status.success() {
++        return Vec::new();
++    }
++    let text = String::from_utf8_lossy(&out.stdout);
++    let mut sources = Vec::new();
++    for line in text.lines() {
++        // `0\tiramauto_null.monitor\tmodule-null-sink.c\ts16le 2ch 44100Hz\tSUSPENDED`
++        let mut cols = line.split('\t');
++        let _idx = cols.next();
++        if let Some(name) = cols.next() {
++            // Description comes from the verbose listing; short has none —
++            // use the name for both (matches the macOS backend's id/name
++            // pairing convention when no friendly name exists).
++            sources.push((name.to_string(), name.to_string()));
++        }
++    }
++    sources
++    .into_iter()
++    .filter(|(name, _)| is_monitor_name(name))
++    .collect()
++}
++
++impl SpeakerInput {
++    pub fn new(device_id: Option<String>) -> Result<Self> {
++        // Keep the "sck" escape hatch working: upstream main.ts constructs
++        // SystemAudioCapture('sck') on macOS; on Linux there is no SCK, so
++        // treat it as the default monitor instead of failing.
++        let device_id = device_id.filter(|id| !id.is_empty() && id != "sck" && id != "default");
++        Ok(Self { device_id })
++    }
++
++    /// Spawn the capture thread and wait for it to report its real sample
++    /// rate. Returns Err if init fails or times out, mirroring the WASAPI
++    /// backend contract in windows.rs so lib.rs surfaces the failure to JS
++    /// instead of degrading to a silent fake stream.
++    pub fn stream(self) -> Result<SpeakerStream> {
++        let rb = HeapRb::<f32>::new(RING_BUFFER_SAMPLES);
++        let (producer, consumer) = rb.split();
++
++        let stop_signal = Arc::new(StopSignal::new());
++        let (init_tx, init_rx) = std::sync::mpsc::channel();
++        let device_id = self.device_id;
++
++        let stop_clone = stop_signal.clone();
++        let capture_thread = thread::spawn(move || {
++            if let Err(e) = Self::capture_audio_loop(producer, stop_clone, init_tx, device_id) {
++                eprintln!("[SystemAudio-Pulse] capture loop failed: {}", e);
++            }
++        });
++
++        let actual_sample_rate = match init_rx.recv_timeout(Duration::from_secs(5)) {
++            Ok(Ok(rate)) => rate,
++            Ok(Err(e)) => {
++                let _ = capture_thread.join();
++                return Err(anyhow::anyhow!("PulseAudio monitor init failed: {}", e));
++            }
++            Err(_) => {
++                let _ = capture_thread.join();
++                return Err(anyhow::anyhow!(
++                    "PulseAudio monitor init timed out after 5s (no monitor source, or device busy)"
++                ));
++            }
++        };
++
++        Ok(SpeakerStream {
++            consumer: Some(consumer),
++            stop_signal,
++            capture_thread: Some(capture_thread),
++            actual_sample_rate,
++        })
++    }
++
++    fn capture_audio_loop(
++        mut producer: HeapProd<f32>,
++        stop_signal: Arc<StopSignal>,
++        init_tx: std::sync::mpsc::Sender<Result<u32>>,
++        device_id: Option<String>,
++    ) -> Result<()> {
++        let fail = |msg: anyhow::Error| -> Result<()> {
++            let _ = init_tx.send(Err(anyhow::anyhow!("{}", msg)));
++            Err(msg)
++        };
++
++        let pcm_name = resolve_pcm_name(device_id.as_deref());
++
++        // When the user picked a NON-monitor output route (or the default),
++        // prefer the default sink's monitor explicitly: `parec -d
++        // @DEFAULT_MONITOR@` semantics. pactl gives the default sink name;
++        // its monitor is `<sink>.monitor` on both PulseAudio and PipeWire.
++        // Falls back to plain "pulse" when pactl is unavailable (CI runners
++        // without a session bus) — the ALSA pulse plugin then captures the
++        // default source, which on desktops is the default monitor chain.
++        let pcm_name = if pcm_name == "pulse" {
++            default_monitor_pcm().unwrap_or(pcm_name)
++        } else {
++            pcm_name
++        };
++
++        let pcm = match PCM::new(&pcm_name, alsa::Direction::Capture, false) {
++            Ok(p) => p,
++            Err(e) => {
++                return fail(anyhow::anyhow!(
++                    "cannot open '{}' ({}). System audio capture needs a running PulseAudio/PipeWire server.",
++                    pcm_name,
++                    e
++                ));
++            }
++        };
++
++        // 48kHz stereo S16LE: the monitor's native rate on virtually all
++        // desktops (PipeWire/PulseAudio resample internally). The lib.rs
++        // resampler converts to the 16kHz canonical STT rate downstream.
++        let sample_rate: u32 = 48_000;
++        let channels: u32 = 2;
++        {
++            let hwp = HwParams::any(&pcm).map_err(|e| anyhow::anyhow!("hw params: {}", e))?;
++            hwp.set_channels(channels)
++                .map_err(|e| anyhow::anyhow!("set channels: {}", e))?;
++            hwp.set_rate(sample_rate, alsa::ValueOr::Nearest)
++                .map_err(|e| anyhow::anyhow!("set rate: {}", e))?;
++            hwp.set_format(Format::S16LE)
++                .map_err(|e| anyhow::anyhow!("set format: {}", e))?;
++            hwp.set_access(Access::RWInterleaved)
++                .map_err(|e| anyhow::anyhow!("set access: {}", e))?;
++            pcm.hw_params(&hwp)
++                .map_err(|e| anyhow::anyhow!("apply hw params: {}", e))?;
++        }
++        let io = pcm.io_i16().map_err(|e| anyhow::anyhow!("io handle: {}", e))?;
++
++        println!(
++            "[SystemAudio-Pulse] Monitor: {} ({}Hz stereo S16LE)",
++            pcm_name, sample_rate
++        );
++        // Publish the real hardware rate BEFORE the lib.rs stuck-watchdog
++        // starts counting (same ordering as the WASAPI backend).
++        let _ = init_tx.send(Ok(sample_rate));
++
++        let mut buf = vec![0i16; FRAMES_PER_READ * channels as usize];
++        let mut consecutive_errors: u32 = 0;
++        loop {
++            if stop_signal.is_raised() {
++                break;
++            }
++            match io.readi(&mut buf) {
++                Ok(frames) => {
++                    consecutive_errors = 0;
++                    if frames == 0 {
++                        continue;
++                    }
++                    // Downmix to mono (channel 0), matching the microphone
++                    // path's convention.
++                    let ch = channels as usize;
++                    for f in 0..frames {
++                        let s = buf[f * ch] as f32 / 32768.0;
++                        let _ = producer.try_push(s);
++                    }
++                }
++                Err(e) => {
++                    // EPIPE (overrun): recover and continue — the DSP loop
++                    // tolerates gaps; only a run of failures means the
++                    // device died (headset unplugged, server restarted).
++                    consecutive_errors += 1;
++                    eprintln!(
++                        "[SystemAudio-Pulse] read error {}/5: {}",
++                        consecutive_errors, e
++                    );
++                    if consecutive_errors >= 5 {
++                        stop_signal.raise(format!("PulseAudio monitor read failed 5 times in a row: {}", e));
++                        break;
++                    }
++                    if let Err(recover_err) = pcm.try_recover(e, false) {
++                        eprintln!("[SystemAudio-Pulse] recover failed: {}", recover_err);
++                        thread::sleep(Duration::from_millis(100));
++                    }
++                }
++            }
++        }
++
++        drop(io);
++        drop(pcm);
++        Ok(())
++    }
++}
++
++/// `pulse:<default-sink>.monitor`, or None when pactl/the server is
++/// unavailable. Keeps explicit device selection working when the user
++/// picked a sink by its non-monitor name upstream.
++fn default_monitor_pcm() -> Option<String> {
++    let out = std::process::Command::new("pactl")
++        .args(["get-default-sink"])
++        .output()
++        .ok()?;
++    if !out.status.success() {
++        return None;
++    }
++    let sink = String::from_utf8_lossy(&out.stdout).trim().to_string();
++    if sink.is_empty() {
++        return None;
++    }
++    Some(format!("pulse:{}.monitor", sink))
++}
++
++pub fn list_output_devices() -> Result<Vec<(String, String)>> {
++    // Monitor sources ARE the output-device list on Linux: each one loops
++    // back exactly what its sink plays, so picking a monitor == picking
++    // the output route (same 1:1 shape as WASAPI render devices).
++    Ok(pactl_sources())
++}
++
++/// Default monitor id for the JS route-change poller. Empty when no monitor
++/// exists (JS treats empty as "no route", same as other backends).
++pub fn default_output_device_uid() -> String {
++    pactl_sources().into_iter().next().map(|(id, _)| id).unwrap_or_default()
++}
++
++impl SpeakerStream {
++    pub fn sample_rate(&self) -> u32 {
++        self.actual_sample_rate
++    }
++
++    pub fn take_consumer(&mut self) -> Option<HeapCons<f32>> {
++        self.consumer.take()
++    }
++
++    pub fn take_stop_error(&self) -> Option<String> {
++        self.stop_signal.take()
++    }
++
++    pub fn backend_name(&self) -> &'static str {
++        "pulse"
++    }
++
++    pub fn pause(&mut self) {
++        // Monitor capture has no pause primitive at this layer; callers
++        // stop()/drop the stream instead. Kept for interface parity with
++        // the macOS/Windows backends.
++    }
++
++    pub fn resume(&mut self) -> Result<()> {
++        Ok(())
++    }
++}
++
++impl Drop for SpeakerStream {
++    fn drop(&mut self) {
++        self.stop_signal.raise(String::new());
++        // Join the capture thread so ALSA handles are released before a
++        // subsequent start() constructs a fresh monitor (same discipline
++        // as the WASAPI Drop impl). Bounded wait: a blocking readi() on a
++        // silent monitor can sleep up to one period; 2s is ample and never
++        // blocks teardown forever on a wedged handle.
++        if let Some(handle) = self.capture_thread.take() {
++            let (tx, rx) = std::sync::mpsc::channel();
++            std::thread::spawn(move || {
++                let _ = handle.join();
++                let _ = tx.send(());
++            });
++            let _ = rx.recv_timeout(Duration::from_secs(2));
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{is_monitor_name, resolve_pcm_name};
++
++    #[test]
++    fn monitor_name_matches_pulseaudio_monitors() {
++        assert!(is_monitor_name("Monitor of Dummy Output"));
++        assert!(is_monitor_name(
++            "Monitor of Family 17h (Models 10h-1fh) HD Audio Controller Digital Stereo (HDMI)"
++        ));
++        assert!(is_monitor_name("auto_null.monitor"));
++    }
++
++    #[test]
++    fn monitor_name_rejects_plain_inputs() {
++        assert!(!is_monitor_name("Default Microphone"));
++        assert!(!is_monitor_name("USB Audio Device"));
++    }
++
++    #[test]
++    fn pcm_name_defaults_to_pulse() {
++        assert_eq!(resolve_pcm_name(None), "pulse");
++        assert_eq!(resolve_pcm_name(Some("")), "pulse");
++        assert_eq!(resolve_pcm_name(Some("default")), "pulse");
++        assert_eq!(resolve_pcm_name(Some("sck")), "pulse");
++    }
++
++    #[test]
++    fn pcm_name_prefixes_explicit_monitors() {
++        assert_eq!(
++            resolve_pcm_name(Some("auto_null.monitor")),
++            "pulse:auto_null.monitor"
++        );
++        assert_eq!(
++            resolve_pcm_name(Some("pulse:auto_null.monitor")),
++            "pulse:auto_null.monitor"
++        );
++    }
++}
+diff --git a/native-module/src/speaker/mod.rs b/native-module/src/speaker/mod.rs
+index 42ac85e..076a388 100644
+--- a/native-module/src/speaker/mod.rs
++++ b/native-module/src/speaker/mod.rs
+@@ -32,21 +32,32 @@ pub use windows::SpeakerStream;
+ #[cfg(target_os = "windows")]
+ pub use windows::default_output_device_uid;
+ 
+-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
++#[cfg(target_os = "linux")]
++pub mod linux;
++#[cfg(target_os = "linux")]
++pub use linux::list_output_devices;
++#[cfg(target_os = "linux")]
++pub use linux::SpeakerInput;
++#[cfg(target_os = "linux")]
++pub use linux::SpeakerStream;
++#[cfg(target_os = "linux")]
++pub use linux::default_output_device_uid;
++
++#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+ pub mod fallback {
+-    // Stub implementation for Linux (and any other unsupported platform).
+-    // The system-audio capture pipeline is macOS/Windows only — `new()` always
+-    // returns an error, so `stream()` / `pause()` etc. are never reached at
+-    // runtime. These stubs exist only so the rest of the crate (lib.rs) still
+-    // type-checks on Linux instead of failing with E0599 on `.stream()` calls.
+-    // See issue #219.
++    // Stub implementation for any other unsupported platform.
++    // The system-audio capture pipeline is macOS/Windows/Linux-only —
++    // `new()` always returns an error, so `stream()` / `pause()` etc. are
++    // never reached at runtime. These stubs exist only so the rest of the
++    // crate (lib.rs) still type-checks instead of failing with E0599 on
++    // `.stream()` calls.
+     use anyhow::Result;
+     use ringbuf::HeapCons;
+     pub struct SpeakerInput;
+     pub struct SpeakerStream;
+     impl SpeakerInput {
+         pub fn new(_device_id: Option<String>) -> Result<Self> {
+-            Err(anyhow::anyhow!("Unsupported platform: system audio capture is implemented for macOS and Windows only"))
++            Err(anyhow::anyhow!("Unsupported platform: system audio capture is implemented for macOS, Windows and Linux only"))
+         }
+         pub fn stream(self) -> Result<SpeakerStream> {
+             Err(anyhow::anyhow!("Unsupported platform"))
+@@ -90,11 +101,11 @@ pub mod fallback {
+         String::new()
+     }
+ }
+-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
++#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+ pub use fallback::list_output_devices;
+-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
++#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+ pub use fallback::SpeakerInput;
+-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
++#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+ pub use fallback::SpeakerStream;
+-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
++#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+ pub use fallback::default_output_device_uid;
 diff --git a/package.json b/package.json
 index c9806cb..fde61ad 100644
 --- a/package.json
