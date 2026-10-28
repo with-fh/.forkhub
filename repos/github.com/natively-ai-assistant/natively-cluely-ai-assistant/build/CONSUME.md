@@ -7,16 +7,24 @@ everything, then it self-updates from here.
 ## Install
 
 - **Linux:** the `natively_*_amd64.deb` below (recommended — installs a
-  system-wide desktop entry + icon, so the dock shows the app and offers
-  pin-to-dock), or the `Natively-*-x86_64.AppImage` (`chmod +x`, then run).
-  The AppImage carries the same `StartupWMClass` contract, so with
+  system-wide desktop entry + icon at a stable path
+  (`/opt/corespeechd/natively`), so launchers and panels find the app by
+  name and any pin you create keeps working across updates), or the
+  `Natively-*-x86_64.AppImage` (`chmod +x`, then run). The AppImage
+  carries the same `StartupWMClass` contract, so with
   [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher)
   (or `appimaged`) it integrates too — one click moves it to
-  `~/Applications` and registers the desktop entry, with dock
-  pinning working the same way. A bare `chmod +x` + run with no
-  integration daemon is the only setup with no registered entry.
-  Either way the in-app updater (Settings → Version → Check) self-updates
-  the AppImage in place; the `.deb` additionally updates through apt.
+  `~/Applications` and registers a desktop entry with the icon, so the
+  running window groups under it instead of showing a generic icon. On
+  GNOME/dock-style panels that offer pin-to-dock, pinning then works;
+  on plain tasklists (e.g. Xfce's default tasklist) there is no pin
+  action — add a panel launcher pointing at the `.desktop` file
+  instead. Note the AppImage filename contains the version, so a pin or
+  launcher pointing at it goes stale on the next update — the `.deb`'s
+  stable path avoids that. A bare `chmod +x` + run with no integration
+  daemon registers nothing at all. Either way the in-app updater
+  (Settings → Version → Check) self-updates the AppImage in place; the
+  `.deb` additionally updates through apt.
 - **macOS (unsigned):** the `Natively-*-arm64.dmg` (Apple Silicon) or
   `Natively-*-x64.dmg` (Intel). First launch: right-click → Open (the
   fork carries no Developer ID signature, so Gatekeeper blocks a plain
