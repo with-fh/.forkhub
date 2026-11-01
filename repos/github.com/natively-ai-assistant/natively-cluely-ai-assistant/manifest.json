@@ -10,11 +10,11 @@
   "patches": {
     "natively-forkhub-support-f276ae13": {
       "status": "applied",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "natively/forkhub-support",
-      "last_realized_against_commit": "b439c1f0"
+      "last_realized_against_commit": "cdc6995"
     }
   },
   "apply_order": [
