@@ -116,6 +116,19 @@ jobs:
             fi
             [ -n "$TAG" ] || { echo "no tag for $TARGET; skipping"; continue; }
 
+            # Freshness gate: a newer dispatch may have already realized
+            # THIS tag while this run's agent was working (concurrent
+            # dispatches from parallel build legs, or the nightly cron
+            # overlapping a manual rerun). Without this, the loser pushes
+            # onto a stale main and dies with "fetch first" — a wasted
+            # agent run plus a red workflow. Re-check the manifest right
+            # before promote; bail to let the winner's artifacts win.
+            manifest_tag() {
+              jq -r --arg id "$1" \
+                '.patches[$id].last_realized_against_tag // .patches[$id].last_realized_against_commit // empty' \
+                "$TDIR/manifest.json" 2>/dev/null
+            }
+
             IDS="${{ inputs.patch }}"
             [ -n "$IDS" ] || IDS=$(jq -r '.apply_order[]' "$TDIR/manifest.json")
             for ID in $IDS; do
@@ -186,11 +199,42 @@ jobs:
               echo "router: $OUTCOME"
               case "$OUTCOME" in
                 PROMOTE)
+                  # Freshness re-check (see gate above): bail if a newer
+                  # dispatch already realized this exact tag while our
+                  # agent was working. The winner's artifacts are already
+                  # on main; pushing ours would clobber or race-fail.
+                  CURRENT="$(manifest_tag "$ID")"
+                  if [ -n "$CURRENT" ] && [ "$CURRENT" = "$TAG" ]; then
+                    echo "$ID already realized against $TAG by a newer dispatch — skipping promote (winner stands)"
+                    continue
+                  fi
                   if [ "$AUTOPROMOTE" = "true" ]; then
                     git -C "$FH" add -A
                     git -C "$FH" -c user.name="forkhub-reimplement" -c user.email="forkhub@imbios.dev" \
                       commit -m "feat(forkhub): re-derive $ID against $TAG (unattended, verify green)" || true
-                    git -C "$FH" push origin main
+                    # A sibling run may have pushed first: rebase onto the
+                    # newest main and only push when WE still own the newest
+                    # realization (loser defers to the winner's commit).
+                    git -C "$FH" fetch origin main
+                    git -C "$FH" rebase origin/main || {
+                      echo "::warning::rebase conflicted; a sibling dispatch likely won — aborting, winner stands"
+                      git -C "$FH" rebase --abort || true
+                      continue
+                    }
+                    git -C "$FH" add -A
+                    git -C "$FH" -c user.name="forkhub-reimplement" -c user.email="forkhub@imbios.dev" \
+                      commit -m "feat(forkhub): re-derive $ID against $TAG (unattended, verify green)" \
+                      --allow-empty || true
+                    if [ "$(manifest_tag "$ID")" != "$TAG" ]; then
+                      echo "$ID superseded during rebase (winner stands) — not pushing"
+                      git -C "$FH" reset --hard origin/main || true
+                      continue
+                    fi
+                    git -C "$FH" push origin main || {
+                      echo "::warning::push raced; winner stands"
+                      git -C "$FH" reset --hard origin/main || true
+                      continue
+                    }
                     echo "promoted to main — build workflow takes it from here"
                   else
                     BR="forkhub/reimpl-$ID"

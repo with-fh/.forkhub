@@ -266,8 +266,20 @@ jobs:
           dispatch_reimplement() {
             patch_id="$1"
             phase="$2"
+            # Dedupe: one reimplement run per target+patch+tag, and never
+            # while a human decision is pending for this patch (no daily
+            # agent spend waiting on an answer). Without this, N parallel
+            # build legs failing on the same drift dispatch N agents that
+            # all push to main and all but one die with "fetch first".
             if gh issue list --repo "$GITHUB_REPOSITORY" --state open --label needs-human-decision               --search "in:title $patch_id" --json number --jq -e '.[0].number' >/dev/null 2>&1; then
               echo "needs-human-decision issue already open for $patch_id; not dispatching"
+              return 0
+            fi
+            PENDING=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "forkhub reimplement" \
+              --status in_progress --json databaseId,displayTitle \
+              --jq '[.[].databaseId] | length' 2>/dev/null || echo "0")
+            if [ "${PENDING:-0}" -gt 0 ]; then
+              echo "a reimplement run is already in progress; not dispatching a duplicate for $patch_id"
               return 0
             fi
             echo "dispatching forkhub reimplement for $patch_id @ $UPSTREAM_TAG ($phase failure)"
