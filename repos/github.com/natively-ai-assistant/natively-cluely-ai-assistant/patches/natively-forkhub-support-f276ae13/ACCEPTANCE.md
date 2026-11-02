@@ -45,7 +45,14 @@ change).
    opens the default monitor, `backend_name() == "pulse"`, fallback stub
    no longer claims Linux unsupported (`LinuxSystemAudio.test.mjs` +
    `cargo test speaker::linux`).
-10. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
+10. **Linux open-at-login round-trips.** Enabling writes exactly one
+    `natively.desktop` entry (valid per `desktop-file-validate`,
+    `StartupWMClass=Natively`, `TryExec` = exe, quoted `Exec`);
+    reading reflects the file (ON after enable, OFF after disable,
+    OFF for missing/stale/Hidden/unparseable entries); disabling
+    deletes it; win32/darwin call shapes are unchanged
+    (`linuxAutostart.test.mjs`).
+11. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
 
 ## How to verify
 
