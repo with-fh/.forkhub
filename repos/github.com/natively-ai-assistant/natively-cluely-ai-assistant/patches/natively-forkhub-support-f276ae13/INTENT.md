@@ -1,11 +1,11 @@
 ---
 id: natively-forkhub-support-f276ae13
-title: Natively ForkHub support (catalog update feed + publisher input + calendar + dock + linux audio)
+title: Natively ForkHub support (catalog update feed + publisher input + calendar + dock + linux audio + linux open-at-login)
 target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
-target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/__tests__/LinuxSystemAudio.test.mjs, electron/services/resolveCompanySearchProvider.ts, native-module/Cargo.toml, native-module/Cargo.lock, native-module/src/speaker/linux.rs, native-module/src/speaker/mod.rs, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
+target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/__tests__/LinuxSystemAudio.test.mjs, electron/services/resolveCompanySearchProvider.ts, electron/utils/linuxAutostart.ts, electron/utils/__tests__/linuxAutostart.test.mjs, electron/utils/windowsTaskbarPolicy.ts, native-module/Cargo.toml, native-module/Cargo.lock, native-module/src/speaker/linux.rs, native-module/src/speaker/mod.rs, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
 status: applied
 applied_upstream_pr: none
-version: 1.1.1
+version: 1.2.0
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -56,13 +56,25 @@ per software, as the catalog intends.
    surfaced `Unsupported platform ... macOS and Windows only` as a red
    FATAL banner in Audio settings; with it the System Audio Level meter
    moves and meetings transcribe system audio.
+6. **Linux open-at-login that works.** Settings -> "Open Natively when
+   you log in" writes and reads `~/.config/autostart/natively.desktop`
+   itself (`electron/utils/linuxAutostart.ts`, routed through
+   `windowsTaskbarPolicy.ts`), because Electron's login-item API is a
+   no-op on Linux and the toggle previously wrote nothing and always
+   read OFF. The entry carries `StartupWMClass=Natively` (dock
+   grouping) and `TryExec` so a removed binary is skipped, not
+   errored; IPC reports the real `{success}`. Verified live on
+   Ubuntu 24.04: toggle round-trips, the file validates with
+   `desktop-file-validate`, and the installed AppImage boots from the
+   exact `Exec` line.
 
 ## Why
 
 Upstream hardcodes its own repo as the update feed and holds the only
 OAuth secret and the only signing keys. A patched fork that keeps those
 paths is stuck: offered stock builds over its own patches, a dead
-calendar button, an unclaimable trial, and an unpinnable Linux icon.
+calendar button, an unclaimable trial, an unpinnable Linux icon, and
+a login toggle that silently does nothing on Linux.
 One ForkHub-support patch repoints all of them at the fork's own
 catalog and resources, visibly separated from stock.
 
@@ -114,14 +126,23 @@ catalog and resources, visibly separated from stock.
    button; manual compare with no reachable feed broadcasts instead of
    hanging; manual-download fallback never 404s (catalog release page
    on fork feeds, direct asset link only where names are predictable).
+   The open-at-login toggle reports its real result (`{success}` /
+   fail-closed `false`); a failed write never leaves the toggle ON.
 10. **No repo-wide test/typecheck runs.** Verify with the focused
     suites in `verify.sh` only.
+11. **Exactly one open-at-login entry.** On Linux the patch writes at
+    most one file: `~/.config/autostart/natively.desktop` (honoring
+    `$XDG_CONFIG_HOME`). No per-disguise copies, no second filename —
+    a stale entry from a moved AppImage reads OFF so a re-toggle heals
+    it, and disabling deletes the file. macOS/Windows paths keep the
+    exact upstream Electron calls.
 
 ## Implementation notes
 
-- Realized against upstream `v2.9.2` (commit `b439c1f0`); squashed
+- Realized against upstream `v3.0.0` (commit `cdc6995`); squashed
   2026-10-14 from update-track v7 + fork-ux-and-checks v4 +
-  linux-dock-icon v1 + publisher-input v1 with no behavior change.
+  linux-dock-icon v1 + publisher-input v1 with no behavior change;
+  v1.2.0 adds Linux open-at-login (intent change, hence MINOR).
 - New `electron/update/updateFeed.ts`: feed constants, persisted-owner
   override (`forkhub-updater.json` in userData), `getUpdateFeed()`,
   `normalizeUpdateOwner()`, `checkPublisherCatalog()` (injectable
@@ -133,6 +154,16 @@ catalog and resources, visibly separated from stock.
   tiebreaks in `isRealUpgrade()`/`isVersionNewer()`, catalog-compare
   fallback for manual Checks; Linux-only userData pin + rename.
 - `electron/services/HardwareId.ts` (new): ordered HWID resolution.
+- `electron/utils/linuxAutostart.ts` (new): XDG Autostart entry
+  manager (`~/.config/autostart/natively.desktop`, `$XDG_CONFIG_HOME`
+  honored, `StartupWMClass=Natively`, `TryExec` guard);
+  `windowsTaskbarPolicy.ts` routes `linux` through it while
+  win32/darwin keep the exact upstream Electron calls; `ipcHandlers`
+  `set-open-at-login` reports the real `{success}` and
+  `get-open-at-login` is fail-closed. Tests:
+  `electron/utils/__tests__/linuxAutostart.test.mjs` (entry shape,
+  toggle round-trip, stale-entry healing, Hidden/unparseable handling,
+  HOME fallback, linux/darwin routing — in `verify.sh`).
 - `electron/services/calendarPkce.ts` (new): direct PKCE exchange /
   refresh (secret forwarded when provisioned — REQUIRED, Google 400s
   without it); `CalendarManager` fork-id resolution (baked
