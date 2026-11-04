@@ -298,6 +298,19 @@ jobs:
             printf '%s | %s | %s | %s | %s\n' "${{ matrix.pair.target }}" \
               "${{ matrix.pair.train }}" "${{ matrix.pair.os_key }}" "$1" "$2" >> "$DRIFT_LEDGER"
           }
+          # Drift handoff dedupe: a reimplement run dispatched by an EARLIER
+          # build in this same drift episode already owns the pair. Treat a run
+          # in_progress for THIS tag as "owned" — the step exits 0 without
+          # dispatching a duplicate; the owner run's outcome is the signal.
+          # Only when NO run exists for the pair do we dispatch and hand
+          # off. The tag match is anchored ($-suffixed) so 20261104.4151
+          # does not match a shorter/longer tag.
+          owned_run() {
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow "forkhub reimplement" \
+              --status in_progress --json databaseId,displayTitle \
+              --jq ".[] | select(.displayTitle | test(\"$UPSTREAM_TAG\" + \"\$\")) | .databaseId" 2>/dev/null \
+              | head -1
+          }
           dispatch_reimplement() {
             patch_id="$1"
             phase="$2"
@@ -311,13 +324,11 @@ jobs:
               drift_ledger "$patch_id" "needs-human-decision-open"
               return 1
             fi
-            PENDING=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "forkhub reimplement" \
-              --status in_progress --json databaseId,displayTitle \
-              --jq '[.[].databaseId] | length' 2>/dev/null || echo "0")
-            if [ "${PENDING:-0}" -gt 0 ]; then
-              echo "a reimplement run is already in progress; not dispatching a duplicate for $patch_id"
-              drift_ledger "$patch_id" "reimplement-already-running"
-              return 1
+            PENDING=$(owned_run)
+            if [ -n "${PENDING:-}" ]; then
+              echo "run $PENDING already owns $UPSTREAM_TAG; handed off, awaiting its outcome (triaged)"
+              drift_ledger "$patch_id" "reimplement-owns-$PENDING"
+              return 0
             fi
             echo "dispatching forkhub reimplement for $patch_id @ $UPSTREAM_TAG ($phase failure)"
             if gh workflow run "forkhub reimplement" --repo "$GITHUB_REPOSITORY" \

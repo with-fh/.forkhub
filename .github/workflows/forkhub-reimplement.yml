@@ -222,7 +222,7 @@ jobs:
               echo "opencode exit: $AGENT_EXIT (124 = wall timeout)"
 
               OUTCOME=$(UPSTREAM_TAG="$TAG" PATCH_ID="$ID" AUTHOR="forkhub-reimplement" \
-                sh "$TDIR/build/reimplement-router.sh" "$WORK" "$PDIR")
+                MODEL="$MODEL" sh "$TDIR/build/reimplement-router.sh" "$WORK" "$PDIR")
               echo "router: $OUTCOME"
               case "$OUTCOME" in
                 PROMOTE)
