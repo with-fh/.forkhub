@@ -86,7 +86,20 @@ FH_VERSION="${VER}-${SUFFIX}.${OWNER}.$((N + 1))"
 # late/resumed legs backfill the same release instead of splitting the
 # feed across two tags (which would strand platforms whose manifests
 # live only in the older release).
-if [ -n "$OS_MARKER" ] && [ -n "${FORKHUB_ALL_MARKERS:-}" ]; then
+#
+# Explicit exception: FORKHUB_NEXT_REVISION=1 (workflow_dispatch
+# next_revision=true) always cuts a FRESH number even when the newest
+# release is incomplete. Same-content rebuilds must ship under a NEW
+# number, never same-number/new-bytes: the updater keys on the version
+# string, and same-number/new-bytes reads as "already installed" (or
+# loops) on clients holding the old bytes. The old release is left
+# untouched; the app feed moves to the new tag on publish.
+# Implementation: skip the converge-reuse block below (it can only assign
+# FH_VERSION back to the newest tag's number); the FRESH default computed
+# above (count + 1) then stands.
+if [ "${FORKHUB_NEXT_REVISION:-}" = "1" ] || [ "${FORKHUB_NEXT_REVISION:-}" = "true" ]; then
+  say "next-revision requested: keeping fresh number $FH_VERSION (leaving prior releases untouched)"
+elif [ -n "$OS_MARKER" ] && [ -n "${FORKHUB_ALL_MARKERS:-}" ]; then
   NEWEST=$(printf '%s\n' "$EXISTING_TAGS" | grep -E "^v${ESCAPED_BASE}[-.]${SUFFIX}\\.${OWNER}\\.[0-9]+\$" | sed -E 's/^.*\.([0-9]+)$/\1 &/' | sort -n | tail -1 | sed -E 's/^[0-9]+ //' || true)
   if [ -n "$NEWEST" ]; then
     ASSETS=$(gh release view "$NEWEST" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null || true)

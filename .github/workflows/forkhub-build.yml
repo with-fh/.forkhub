@@ -45,6 +45,11 @@ on:
         required: false
         default: false
         type: boolean
+      next_revision:
+        description: "Cut a NEW provenance revision (N+1) instead of reusing the newest incomplete release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -354,6 +359,12 @@ jobs:
           FORKHUB_OS_MARKER: ${{ steps.ctx.outputs.os_marker }}
           FORKHUB_ALL_MARKERS: ${{ steps.ctx.outputs.all_markers }}
           FORKHUB_OS_SOLE: ${{ matrix.pair.sole }}
+          # Opt-in revision bump (workflow_dispatch next_revision=true):
+          # cut a fresh provenance number even when the newest release is
+          # incomplete (the converge rule would otherwise reuse it). Used
+          # to re-stamp SAME-content rebuilds as N+1 so updaters see a
+          # newer version instead of same-number/new-bytes.
+          FORKHUB_NEXT_REVISION: ${{ inputs.next_revision }}
         run: |
           set -euo pipefail
           FH="$GITHUB_WORKSPACE/forkhub"
