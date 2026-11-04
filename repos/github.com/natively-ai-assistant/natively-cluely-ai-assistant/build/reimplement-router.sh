@@ -45,10 +45,13 @@ if [ -f "$PATCH/verify.sh" ]; then
 fi
 
 # Green: refresh artifacts canonically (do not trust the agent's diff file).
-# REALIZATION/ and NEEDS_HUMAN.md are harness chatter, not the patch.
+# REALIZATION/, NEEDS_HUMAN.md, CONTEXT.md, and PROMPT.md are harness
+# chatter, not the patch — exclude all four so a future apply-check sees
+# only real intent code (a leaked CONTEXT.md would apply cleanly once and
+# then drift-check forever on an untracked harness file).
 MANIFEST="$PATCH/../../manifest.json"
 git -C "$WORK" add -N . 2>/dev/null || true
-git -C "$WORK" diff -- . ':!REALIZATION' ':!NEEDS_HUMAN.md' > "$PATCH/reference.diff"
+git -C "$WORK" diff -- . ':!REALIZATION' ':!NEEDS_HUMAN.md' ':!CONTEXT.md' ':!PROMPT.md' > "$PATCH/reference.diff"
 
 # Semver: unattended re-derivation never changes intent, so PROMOTE
 # always bumps PATCH (MAJOR/MINOR are human-authored with intent changes).
@@ -69,7 +72,24 @@ sed -i "1,/^---$/ s/^last_realized_against_commit: .*/last_realized_against_comm
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ATTEMPT_N=$(($(wc -l < "$PATCH/attempts.jsonl" 2>/dev/null || echo 0) + 1))
-printf '{"n":%s,"phase":"re-derivation","timestamp":"%s","upstream_tag":"%s","upstream_sha":"%s","approach":"unattended opencode re-derivation, verify gate green","result":"passed","tokens":0,"model":"unattended","semver":"%s","change":"patch"}\n' \
-  "$ATTEMPT_N" "$NOW" "$TAG" "$REALIZED_SHA" "$NEW_VERSION" >> "$PATCH/attempts.jsonl"
+# Report trail for the NEXT agent: what upstream changed + what approach
+# worked + what was tried and failed. Sourced from the agent's report —
+# first non-empty line of its "Upstream changes" / "Approach" / "Did not
+# work" sections, capped so one row stays one line of JSON. Empty report
+# sections fall back to the previous defaults, never to a blank record.
+REPORT="$WORK/REALIZATION/report.md"
+pick_section() {
+  awk -v h="$1" 'index($0,h){f=1;next} f&&/^## /{exit} f&&NF{print;exit}' "$REPORT" 2>/dev/null | head -c 300
+}
+UPSTREAM_CHANGES=$(pick_section "Upstream changes")
+APPROACH_TAKEN=$(pick_section "Approach")
+TRIED_FAILED=$(pick_section "Did not work")
+[ -n "$UPSTREAM_CHANGES" ] || UPSTREAM_CHANGES="unattended opencode re-derivation, verify gate green"
+UPSTREAM_CHANGES_JSON=$(printf '%s' "$UPSTREAM_CHANGES" | jq -Rs .)
+APPROACH_JSON=$(printf '%s' "$APPROACH_TAKEN" | jq -Rs .)
+FAILED_JSON=$(printf '%s' "$TRIED_FAILED" | jq -Rs .)
+MODEL_RUN="${MODEL:-unattended}"
+printf '{"n":%s,"phase":"re-derivation","timestamp":"%s","upstream_tag":"%s","upstream_sha":"%s","upstream_changes":%s,"approach":%s,"tried_and_failed":%s,"result":"passed","tokens":0,"model":%s,"semver":"%s","change":"patch"}\n' \
+  "$ATTEMPT_N" "$NOW" "$TAG" "$REALIZED_SHA" "$UPSTREAM_CHANGES_JSON" "$APPROACH_JSON" "$FAILED_JSON" "$(printf '%s' "$MODEL_RUN" | jq -Rs .)" "$NEW_VERSION" >> "$PATCH/attempts.jsonl"
 
 echo "PROMOTE"

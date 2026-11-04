@@ -21,8 +21,10 @@ Manual dispatch only (Actions → `forkhub reimplement` → Run workflow):
 Auto-trigger: the build workflow dispatches this workflow itself when a
 patch fails to apply (or verify) on a new tag — one run per
 target+patch+tag, skipped while a `needs-human-decision` issue for the
-patch is open. A red apply step can still mean "run by hand" when the
-auto-dispatch is suppressed or the router files HUMAN/FAIL.
+patch is open. The build step then exits GREEN-as-triaged: drift with a
+live reimplement run is an expected pipeline state, not a failure
+(see the per-pair drift ledger in the build job summary). A red apply
+step means the handoff itself failed — run by hand, or read the ledger.
 
 ## Secrets / variables (repo scope)
 
@@ -40,14 +42,23 @@ auto-dispatch is suppressed or the router files HUMAN/FAIL.
    `reference.diff` is evidence only, `verify.sh` must go green, finish
    with `REALIZATION/realization.diff` + `report.md`, or with
    `NEEDS_HUMAN.md` (`Decision needed / Options / Recommendation /
-   Blocked by / Cost of waiting`). No questions, no commits, stay in the
+   Blocked by / Cost of waiting`). The job also assembles `CONTEXT.md` —
+   the cold-start kit for THIS run (current tag, failed phase,
+   target_area checklist, last known-good tags). Read it first; the
+   router strips it (with `PROMPT.md`) from the captured diff so it
+   never pollutes the patch. Report sections `Upstream changes` /
+   `Approach` / `Did not work` are extracted into the `attempts.jsonl`
+   row, so the NEXT agent inherits what changed, what worked, and what
+   already failed. No questions, no commits, stay in the
    checkout. Runs with `--auto` inside an **ephemeral runner** — that
    containment is what makes auto-approve acceptable.
 3. **Router** (POSIX sh, unit-tested — see below):
    - `PROMOTE` — realization present AND `verify.sh` green (re-run
      deterministically by the router, not trusted from the agent).
-     Refreshes `reference.diff` canonically (excludes `REALIZATION/`,
-     `NEEDS_HUMAN.md`), bumps semver PATCH (manifest + INTENT
+     Refreshes `reference.diff` canonically (excludes harness files:
+     `REALIZATION/`, `NEEDS_HUMAN.md`, `CONTEXT.md`, `PROMPT.md` — the
+     last two are the per-run cold-start kit assembled by the workflow
+     and must never leak into the patch), bumps semver PATCH (manifest + INTENT
      frontmatter — MAJOR/MINOR are human-authored with intent changes), stamps `last_realized_against_commit`, appends
      `attempts.jsonl`.
    - `HUMAN` — `NEEDS_HUMAN.md` present; partial work saved to

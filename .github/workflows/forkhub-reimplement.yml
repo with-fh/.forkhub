@@ -166,14 +166,41 @@ jobs:
               cp "$PDIR/INTENT.md" "$PDIR/ACCEPTANCE.md" "$WORK/"
               [ -f "$PDIR/reference.diff" ] && cp "$PDIR/reference.diff" "$WORK/"
               [ -f "$PDIR/attempts.jsonl" ] && cp "$PDIR/attempts.jsonl" "$WORK/"
+              # Cold-start kit for the next agent: everything about the
+              # CURRENT tag it needs, without re-reading the catalog repo.
+              # The agent must read all three before implementing.
+              # 1. Drift ledger context: the build pair that handed off,
+              #    which phase failed (apply|verify), and the exact tag.
+              # 2. Prior reference info: how MANY attempts exist, which
+              #    tags were realized before, and the last known-good tag.
+              # 3. Target area: the files this patch owns (INTENT may list
+              #    dozens — this is the checklist to re-verify).
+              ATTEMPT_COUNT=$(wc -l < "$PDIR/attempts.jsonl" 2>/dev/null || echo 0)
+              LAST_TAGS=$(jq -r '[.[] | select(.result=="passed") | .upstream_tag] | .[-3:] | join(", ")' "$PDIR/attempts.jsonl" 2>/dev/null || echo "unknown")
+              cat > "$WORK/CONTEXT.md" <<CTXEOF
+              # Re-derivation context — read this FIRST, then INTENT.md
+              - target: $TARGET
+              - patch: $ID
+              - current upstream tag: $TAG (drift happened HERE)
+              - failed phase in build: see dispatch (apply = patch no longer applies; verify = applies but tests red)
+              - prior attempts: $ATTEMPT_COUNT total; last known-good tags: $LAST_TAGS
+              - target_area (files this patch owns — re-verify every one you touch):
+              $(sed -n 's/^target_area: *\[\(.*\)\]/\1/p' "$PDIR/INTENT.md" | tr ',' '\n' | sed 's/^ *  - /')
+              - full history: attempts.jsonl (each row: n, timestamp, upstream_tag, upstream_sha, approach, result, model, semver)
+              - your report MUST be written so the NEXT agent can learn from it: REALIZATION/report.md must say what upstream changed, what approach you took, and what you tried that did NOT work (the router appends it to attempts.jsonl on PROMOTE).
+          CTXEOF
               cat > "$WORK/PROMPT.md" <<EOF
           You are re-deriving a forkhub intent-patch against a new upstream release.
 
+          Read CONTEXT.md first — it tells you the current tag, which phase
+          failed, and the target_area checklist.
           Source of truth: INTENT.md (what to implement) and ACCEPTANCE.md (must-pass criteria).
           reference.diff is the LAST KNOWN-GOOD realization — evidence only. DO NOT apply it
           mechanically; re-derive the intent against the CURRENT checkout, adapting to renames,
           refactors, and API changes. drift-summary.txt (if present) shows what upstream changed
           in the patch's target_area since the last realization.
+          attempts.jsonl shows every prior attempt — read the recent rows so
+          you do not repeat a failed approach.
 
           Rules:
           1. Work only inside this checkout. Do not touch anything outside it.
@@ -195,7 +222,7 @@ jobs:
               echo "opencode exit: $AGENT_EXIT (124 = wall timeout)"
 
               OUTCOME=$(UPSTREAM_TAG="$TAG" PATCH_ID="$ID" AUTHOR="forkhub-reimplement" \
-                sh "$TDIR/build/reimplement-router.sh" "$WORK" "$PDIR")
+                MODEL="$MODEL" sh "$TDIR/build/reimplement-router.sh" "$WORK" "$PDIR")
               echo "router: $OUTCOME"
               case "$OUTCOME" in
                 PROMOTE)
