@@ -2316,10 +2316,10 @@ index 0000000..f2bb0e2
 +});
 diff --git a/electron/utils/__tests__/linuxAutostart.test.mjs b/electron/utils/__tests__/linuxAutostart.test.mjs
 new file mode 100644
-index 0000000..3cc7901
+index 0000000..d1d9844
 --- /dev/null
 +++ b/electron/utils/__tests__/linuxAutostart.test.mjs
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,252 @@
 +// Linux open-at-login: the toggle writes and reads the XDG Autostart entry
 +// itself, because Electron's set/getLoginItemSettings are no-ops on Linux
 +// (browser_linux.cc). Behavioral tests through the compiled helpers with
@@ -2347,6 +2347,7 @@ index 0000000..3cc7901
 +  linuxAutostartFilePath,
 +  buildLinuxAutostartEntry,
 +  execArgv0,
++  resolveLaunchPath,
 +  setLinuxOpenAtLogin,
 +  getLinuxOpenAtLogin,
 +} = require(dist('utils/linuxAutostart.js'));
@@ -2366,6 +2367,10 @@ index 0000000..3cc7901
 +    if (vars[k] === undefined) delete process.env[k];
 +    else process.env[k] = vars[k];
 +  }
++  // APPIMAGE must never leak between cases: a stale host APPIMAGE would make
++  // resolveLaunchPath prefer it over the temp HOME (see the FUSE tests).
++  const savedAppImage = process.env.APPIMAGE;
++  delete process.env.APPIMAGE;
 +  try {
 +    return fn();
 +  } finally {
@@ -2373,8 +2378,15 @@ index 0000000..3cc7901
 +      if (saved[k] === undefined) delete process.env[k];
 +      else process.env[k] = saved[k];
 +    }
++    if (savedAppImage === undefined) delete process.env.APPIMAGE;
++    else process.env.APPIMAGE = savedAppImage;
 +  }
 +}
++
++// Delete any ambient APPIMAGE for the whole file: the shell that runs the
++// suite may itself be an AppImage child (or export APPIMAGE=), and the
++// compiled helpers default env to process.env.
++delete process.env.APPIMAGE;
 +
 +// --- entry shape ------------------------------------------------------------
 +
@@ -2417,7 +2429,54 @@ index 0000000..3cc7901
 +  assert.equal(LINUX_AUTOSTART_FILENAME, 'natively.desktop');
 +});
 +
-+// --- read semantics ---------------------------------------------------------
++// --- launch-path resolution (AppImage FUSE mountpoint is dead at login) ---
++
++test('resolveLaunchPath prefers $APPIMAGE when it exists', () => {
++  const fake = '/stable/path/Natively.AppImage';
++  assert.equal(resolveLaunchPath('/tmp/.mount_Dead123/natively', { APPIMAGE: fake }), fake);
++});
++
++test('resolveLaunchPath keeps a directly-executable exe as-is', () => {
++  assert.equal(resolveLaunchPath('/bin/true', {}), '/bin/true');
++});
++
++test('resolveLaunchPath falls back to the raw exe when nothing better exists', () => {
++  assert.equal(resolveLaunchPath('/nonexistent/natively-xyz', {}), '/nonexistent/natively-xyz');
++});
++
++test('enable from a FUSE-mounted run writes the stable AppImage path', () => {
++  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'natively-app-'));
++  const fakeAppImage = path.join(dir, 'Natively.AppImage');
++  fs.writeFileSync(fakeAppImage, '#!/bin/sh\n');
++  const { env } = tempEnv({ APPIMAGE: fakeAppImage });
++  assert.equal(setLinuxOpenAtLogin(true, '/tmp/.mount_Dead123/natively', env), true);
++  const text = fs.readFileSync(linuxAutostartFilePath(env), 'utf8');
++  const execLine = text.split('\n').find((l) => l.startsWith('Exec='));
++  assert.ok(execLine.includes(fakeAppImage), 'entry must launch the AppImage: ' + execLine);
++  assert.equal(getLinuxOpenAtLogin(fakeAppImage, env), true);
++  // Same-session re-read under the mountpoint exe resolves to the same
++  // stable path (the env carries APPIMAGE), so it reads ON too.
++  assert.equal(getLinuxOpenAtLogin('/tmp/.mount_Dead123/natively', env), true);
++});
++
++test('a FUSE-mountpoint entry from an older write reads OFF (heals on re-toggle)', () => {
++  const { env } = tempEnv();
++  // Old v1.2.0 entry: raw mountpoint bytes, no APPIMAGE at write time.
++  setLinuxOpenAtLogin(true, '/tmp/.mount_Dead123/natively', env);
++  // Writer and reader agree (same mountpoint, same session): ON.
++  assert.equal(getLinuxOpenAtLogin('/tmp/.mount_Dead123/natively', env), true);
++  // Next login: the mountpoint is gone (TryExec fails). The healed entry
++  // points at the stable host path, so the dead one reads OFF.
++  fs.unlinkSync(linuxAutostartFilePath(env));
++  fs.writeFileSync(
++    linuxAutostartFilePath(env),
++    buildLinuxAutostartEntry('/tmp/.mount_Dead123/natively')
++  );
++  delete process.env.APPIMAGE;
++  assert.equal(getLinuxOpenAtLogin('/home/test/Applications/Natively-App.AppImage', env), false);
++});
++
++// --- read semantics ---
 +
 +test('get reads OFF when no entry exists, ON after enable, OFF after disable', () => {
 +  const { env } = tempEnv();
@@ -2515,10 +2574,10 @@ index 0000000..3cc7901
 +});
 diff --git a/electron/utils/linuxAutostart.ts b/electron/utils/linuxAutostart.ts
 new file mode 100644
-index 0000000..5929cbc
+index 0000000..1b63682
 --- /dev/null
 +++ b/electron/utils/linuxAutostart.ts
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,207 @@
 +// Linux open-at-login: the app's own XDG Autostart entry.
 +//
 +// Electron's setLoginItemSettings/getLoginItemSettings are no-ops on Linux
@@ -2542,6 +2601,15 @@ index 0000000..5929cbc
 +// - Disable deletes the file. A `Hidden=true` entry (e.g. the user turned it
 +//   off in GNOME Startup Applications) reads as OFF.
 +// - Never throws for a missing file/dir (ENOENT → OFF / no-op remove).
++// - The autostart Exec must be a path the session can launch WITHOUT any
++//   FUSE mount alive: `app.getPath('exe')` inside an AppImage returns the
++//   FUSE mountpoint (`/tmp/.mount_*/natively`), which is gone by next login,
++//   so enabling from a mounted AppImage run writes a dead entry whose
++//   TryExec fails at login. `resolveLaunchPath()` below prefers a stable,
++//   directly-executable path and only falls back to the raw exe when no
++//   better candidate exists. Session managers skip unlaunchable entries
++//   silently, and a failed TryExec at login reads back as OFF (fail-closed),
++//   so the toggle repairs itself on next enable.
 +//
 +// Pure module: node builtins only, no electron import. `env` (default
 +// process.env) is injectable so tests stay hermetic via XDG_CONFIG_HOME.
@@ -2559,6 +2627,7 @@ index 0000000..5929cbc
 +export interface LinuxAutostartEnv {
 +  HOME?: string;
 +  XDG_CONFIG_HOME?: string;
++  APPIMAGE?: string;
 +}
 +
 +function homeDir(env: LinuxAutostartEnv): string {
@@ -2655,19 +2724,49 @@ index 0000000..5929cbc
 +    return true;
 +  }
 +  fs.mkdirSync(path.dirname(file), { recursive: true });
-+  fs.writeFileSync(file, buildLinuxAutostartEntry(exePath));
++  fs.writeFileSync(file, buildLinuxAutostartEntry(resolveLaunchPath(exePath, env)));
 +  return true;
++}
++
++/**
++ * Resolve the path the autostart entry should launch.
++ * Inside a FUSE-mounted AppImage, app.getPath(exe) returns a transient
++ * mountpoint path that is gone by next login, so prefer the APPIMAGE env
++ * host path when present, else the raw exe when directly executable,
++ * else the raw exe unchanged.
++ */
++export function resolveLaunchPath(
++  exePath: string,
++  env: LinuxAutostartEnv = process.env,
++): string {
++  const appImage = env.APPIMAGE;
++  if (appImage) return appImage;
++  try {
++    fs.accessSync(exePath, fs.constants.X_OK);
++    return exePath;
++  } catch {
++    return exePath;
++  }
 +}
 +
 +/**
 + * True when our autostart entry exists, is not hidden, and points at this
 + * executable. Anything else (missing, unparseable, Hidden=true, stale Exec
-+ * from a moved AppImage) is OFF — fail-closed so the toggle never lies ON.
++ * from a moved AppImage, or a FUSE-mountpoint entry from an older AppImage
++ * run) is OFF — fail-closed so the toggle never lies ON.
++ *
++ * The stored Exec must equal the RESOLVED current launch path for ON.
++ * Resolution is symmetric with set(): without it, enabling from an AppImage
++ * run would write the stable host path yet read back OFF (stored host path
++ * !== mountpoint exe). A stale entry (AppImage moved, deb-vs-AppImage
++ * switch, dead mountpoint from an older write) resolves differently and
++ * reads OFF, prompting a healing re-toggle.
 + */
 +export function getLinuxOpenAtLogin(
 +  exePath: string,
 +  env: LinuxAutostartEnv = process.env,
 +): boolean {
++  const expected = resolveLaunchPath(exePath, env);
 +  let text: string;
 +  try {
 +    text = fs.readFileSync(linuxAutostartFilePath(env), 'utf8');
@@ -2684,7 +2783,7 @@ index 0000000..5929cbc
 +  if ((fields.get('Hidden') ?? 'false').toLowerCase() === 'true') return false;
 +  const exec = fields.get('Exec');
 +  if (!exec) return false;
-+  return execArgv0(exec) === exePath;
++  return execArgv0(exec) === expected;
 +}
 diff --git a/electron/utils/windowsTaskbarPolicy.ts b/electron/utils/windowsTaskbarPolicy.ts
 index aefe532..7425119 100644
