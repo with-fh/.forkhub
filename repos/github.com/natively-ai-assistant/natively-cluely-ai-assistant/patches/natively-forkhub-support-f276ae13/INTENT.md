@@ -5,7 +5,7 @@ target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
 target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/__tests__/LinuxSystemAudio.test.mjs, electron/services/resolveCompanySearchProvider.ts, electron/utils/linuxAutostart.ts, electron/utils/__tests__/linuxAutostart.test.mjs, electron/utils/windowsTaskbarPolicy.ts, native-module/Cargo.toml, native-module/Cargo.lock, native-module/src/speaker/linux.rs, native-module/src/speaker/mod.rs, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
 status: applied
 applied_upstream_pr: none
-version: 1.2.0
+version: 1.2.1
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -74,7 +74,10 @@ Upstream hardcodes its own repo as the update feed and holds the only
 OAuth secret and the only signing keys. A patched fork that keeps those
 paths is stuck: offered stock builds over its own patches, a dead
 calendar button, an unclaimable trial, an unpinnable Linux icon, and
-a login toggle that silently does nothing on Linux.
+a login toggle that silently does nothing on Linux. v1.2.1 resolves
+the launch path at write time: AppImage runs record `$APPIMAGE` (the
+stable host path) instead of the dead FUSE mountpoint
+`app.getPath('exe')` returns, so the entry survives logout/login.
 One ForkHub-support patch repoints all of them at the fork's own
 catalog and resources, visibly separated from stock.
 
@@ -142,7 +145,10 @@ catalog and resources, visibly separated from stock.
 - Realized against upstream `v3.0.0` (commit `cdc6995`); squashed
   2026-10-14 from update-track v7 + fork-ux-and-checks v4 +
   linux-dock-icon v1 + publisher-input v1 with no behavior change;
-  v1.2.0 adds Linux open-at-login (intent change, hence MINOR).
+  v1.2.0 adds Linux open-at-login (intent change, hence MINOR);
+  v1.2.1 records the stable AppImage host path instead of the dead
+  FUSE mountpoint (live QA: entry read ON but launched nothing after
+  relogin because TryExec failed on the gone mountpoint).
 - New `electron/update/updateFeed.ts`: feed constants, persisted-owner
   override (`forkhub-updater.json` in userData), `getUpdateFeed()`,
   `normalizeUpdateOwner()`, `checkPublisherCatalog()` (injectable

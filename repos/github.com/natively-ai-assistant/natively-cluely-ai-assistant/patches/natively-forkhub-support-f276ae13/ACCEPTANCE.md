@@ -51,7 +51,11 @@ change).
     reading reflects the file (ON after enable, OFF after disable,
     OFF for missing/stale/Hidden/unparseable entries); disabling
     deletes it; win32/darwin call shapes are unchanged
-    (`linuxAutostart.test.mjs`).
+    (`linuxAutostart.test.mjs`). v1.2.1: the written Exec is the
+    stable AppImage host path (`$APPIMAGE`), never the dead FUSE
+    mountpoint `app.getPath('exe')` returns inside an AppImage run —
+    a mountpoint entry reads OFF after relogin, prompting a healing
+    re-toggle; the stale-path suite pins this.
 11. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
 
 ## How to verify
