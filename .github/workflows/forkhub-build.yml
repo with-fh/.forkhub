@@ -13,6 +13,16 @@ name: forkhub build
 # (e.g. ["stable", "nightly"]); the build matrix fans out to one job per
 # (target, train). Absent trains means ["default"]: legacy newest-tag behavior.
 #
+# Drift contract: when a patch no longer applies (or its verify fails) on
+# a new tag, the build hands the pair off to `forkhub reimplement`
+# (exactly-once per target+patch+tag) and the job step exits GREEN-as-
+# triaged — drift with a live reimplement run is an expected pipeline
+# state, not a build failure. The outcome lands in the per-pair drift
+# ledger in the job summary; the authoritative per-patch record is
+# attempts.jsonl (tag + SHA + prompt/model/variant + result). A red step
+# means the handoff itself failed (dispatch suppressed/failed, no run
+# in flight) and needs human attention.
+#
 # OS legs: a target lists builder OSs in upstream.json:build_runs_on
 # (e.g. ["ubuntu-latest", "macos-14", "windows-latest"]); the matrix fans
 # out to one job per (target, train, os). Absent means ["ubuntu-latest"]:
@@ -96,6 +106,11 @@ jobs:
     name: build ${{ matrix.pair.target }} ${{ matrix.pair.train }} (${{ matrix.pair.os_key }})
     needs: [discover]
     if: needs.discover.outputs.builds != '[]'
+    # Triaged drift exits the apply step 0: fail-fast=false + per-pair
+    # jobs mean one pair's drift never blocks the others, and the green
+    # job + drift-ledger row (not a red check) is the signal. A pair is
+    # red ONLY when its handoff failed (see apply step) — that needs a
+    # human, not a rebuild.
     strategy:
       fail-fast: false
       matrix:
@@ -256,6 +271,7 @@ jobs:
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
       - name: Apply intent stack in manifest order + verify gate
+        id: apply
         if: steps.skip-check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -264,10 +280,24 @@ jobs:
           # Drift auto-triage (user-explicit: daily nightly pipeline must
           # reimplement and rebuild without a human in the loop). On apply
           # or verify failure, dispatches ONE `forkhub reimplement` run for
-          # this target+patch+tag, then fails so the fresh realization
-          # rebuilds on promote. Skips dispatch while a needs-human-decision
-          # issue is already open for this patch (no daily agent spend
-          # while a human decision is pending).
+          # this target+patch+tag, then reports the job GREEN-as-triaged —
+          # drift handed off to reimplement is an expected pipeline state,
+          # not a build failure. The outcome is carried in the job-summary
+          # drift ledger (jobs.<job>.conclusion stays success; per-pair
+          # rows show reimplement-dispatched vs genuine failure). Genuine
+          # failures (dispatch suppressed/failed, no reimplement run for
+          # this pair) still exit 1. Skips dispatch while a
+          # needs-human-decision issue is already open for this patch (no
+          # daily agent spend while a human decision is pending).
+          # GITHUB_STEP_SUMMARY note: the ledger is advisory only — the
+          # authoritative record per patch/tag is attempts.jsonl (written
+          # by reimplement-router.sh), keyed by upstream tag + SHA.
+          DRIFT_LEDGER="$(mktemp)"
+          echo "DRIFT_LEDGER=$DRIFT_LEDGER" >> "$GITHUB_ENV"
+          drift_ledger() {
+            printf '%s | %s | %s | %s | %s\n' "${{ matrix.pair.target }}" \
+              "${{ matrix.pair.train }}" "${{ matrix.pair.os_key }}" "$1" "$2" >> "$DRIFT_LEDGER"
+          }
           dispatch_reimplement() {
             patch_id="$1"
             phase="$2"
@@ -278,19 +308,27 @@ jobs:
             # all push to main and all but one die with "fetch first".
             if gh issue list --repo "$GITHUB_REPOSITORY" --state open --label needs-human-decision               --search "in:title $patch_id" --json number --jq -e '.[0].number' >/dev/null 2>&1; then
               echo "needs-human-decision issue already open for $patch_id; not dispatching"
-              return 0
+              drift_ledger "$patch_id" "needs-human-decision-open"
+              return 1
             fi
             PENDING=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "forkhub reimplement" \
               --status in_progress --json databaseId,displayTitle \
               --jq '[.[].databaseId] | length' 2>/dev/null || echo "0")
             if [ "${PENDING:-0}" -gt 0 ]; then
               echo "a reimplement run is already in progress; not dispatching a duplicate for $patch_id"
-              return 0
+              drift_ledger "$patch_id" "reimplement-already-running"
+              return 1
             fi
             echo "dispatching forkhub reimplement for $patch_id @ $UPSTREAM_TAG ($phase failure)"
-            gh workflow run "forkhub reimplement" --repo "$GITHUB_REPOSITORY" \
-              -f target="${{ matrix.pair.target }}" -f patch="$patch_id" -f tag="$UPSTREAM_TAG" \
-              || echo "::warning::reimplement dispatch failed for $patch_id"
+            if gh workflow run "forkhub reimplement" --repo "$GITHUB_REPOSITORY" \
+              -f target="${{ matrix.pair.target }}" -f patch="$patch_id" -f tag="$UPSTREAM_TAG"; then
+              drift_ledger "$patch_id" "reimplement-dispatched"
+              return 0
+            else
+              echo "::warning::reimplement dispatch failed for $patch_id"
+              drift_ledger "$patch_id" "dispatch-failed"
+              return 1
+            fi
           }
 
           set -euo pipefail
@@ -320,7 +358,15 @@ jobs:
             fi
             if ! git -C "$BD" apply --check "$CLEAN"; then
               echo "::error::$id no longer applies to $UPSTREAM_TAG — drift detected"
-              dispatch_reimplement "$id" "apply"
+              if dispatch_reimplement "$id" "apply"; then
+                # Drift handed off to reimplement: expected pipeline
+                # state, not a build failure. Skip the remaining steps for
+                # this pair; the promoted realization rebuilds next run.
+                echo "::notice::$id handed to forkhub reimplement — triaged, not failed"
+                echo "triaged=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::$id drift could not be handed off (see drift ledger) — genuine failure"
               exit 1
             fi
             git -C "$BD" apply "$CLEAN"
@@ -328,14 +374,42 @@ jobs:
             if [ -f "$p/verify.sh" ]; then
               if ! (cd "$BD" && sh "$p/verify.sh"); then
                 echo "::error::$id verify failed on $UPSTREAM_TAG — drift detected"
-                dispatch_reimplement "$id" "verify"
+                if dispatch_reimplement "$id" "verify"; then
+                  # Same triage contract as the apply path above.
+                  echo "::notice::$id handed to forkhub reimplement — triaged, not failed"
+                  echo "triaged=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                echo "::error::$id drift could not be handed off (see drift ledger) — genuine failure"
                 exit 1
               fi
             fi
           done
+          echo "triaged=false" >> "$GITHUB_OUTPUT"
+
+      - name: Publish drift ledger to job summary
+        # Always runs: records per-pair drift outcome so the green check
+        # distinguishes "built" from "triaged to reimplement". Ledger rows
+        # are advisory; attempts.jsonl is the authoritative record.
+        if: always()
+        run: |
+          {
+            echo "### Drift ledger — ${{ matrix.pair.target }} ${{ matrix.pair.train }} (${{ matrix.pair.os_key }}) @ ${UPSTREAM_TAG:-unknown}"
+            echo
+            echo "| target | train | os | patch | outcome |"
+            echo "|---|---|---|---|---|"
+            if [ -s "$DRIFT_LEDGER" ]; then
+              sed 's/^/| /; s/ | / | /g; s/$/ |/' "$DRIFT_LEDGER"
+            else
+              printf '| %s | %s | %s | — | no drift (built or skipped) |\n' \
+                "${{ matrix.pair.target }}" "${{ matrix.pair.train }}" "${{ matrix.pair.os_key }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Repo-native build (or source tarball fallback)
-        if: steps.skip-check.outputs.skip != 'true'
+        # Skipped when drift was triaged to reimplement (nothing verified
+        # to build); the promoted realization rebuilds on the next run.
+        if: steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORKHUB_VERSION_SUFFIX: ${{ steps.skip-check.outputs.suffix }}
@@ -393,7 +467,7 @@ jobs:
         # github provider, which resolves versions under `v<version>` tags and
         # cannot consume the namespaced *-fhN bundle tags below). Absent hook
         # = no updater release; the namespaced bundle still publishes.
-        if: steps.skip-check.outputs.skip != 'true'
+        if: steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true'
         working-directory: forkhub
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -407,7 +481,7 @@ jobs:
           fi
 
       - name: Publish namespaced release
-        if: steps.skip-check.outputs.skip != 'true'
+        if: steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true'
         working-directory: forkhub
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
