@@ -902,10 +902,10 @@ index 0000000..d64fdae
 +});
 diff --git a/electron/services/__tests__/ForkPatch2Sources.test.mjs b/electron/services/__tests__/ForkPatch2Sources.test.mjs
 new file mode 100644
-index 0000000..9188cd6
+index 0000000..6f7e6e1
 --- /dev/null
 +++ b/electron/services/__tests__/ForkPatch2Sources.test.mjs
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,109 @@
 +// electron/services/__tests__/ForkPatch2Sources.test.mjs
 +//
 +// Source assertions for the ForkHub update-channel patch (catalog feed,
@@ -1005,6 +1005,15 @@ index 0000000..9188cd6
 +  assert.match(src, /setError/);
 +  assert.match(src, /res\.error/);
 +  assert.match(src, /Could not connect calendar/);
++});
++
++test('update-feed: baked catalog default is overridable per fork build', () => {
++  const src = read('electron/update/updateFeed.ts');
++  assert.match(src, /readBakedUpdateFeed/);
++  assert.match(src, /forkhubUpdateOwner/);
++  assert.match(src, /forkhubUpdateRepo/);
++  // Default chain: env > baked > hardcoded with-fh (with-fh ships unstamped).
++  assert.match(src, /envOwner \|\| bakedFeed\.owner \|\| "with-fh"/);
 +});
 diff --git a/electron/services/__tests__/HardwareId.test.mjs b/electron/services/__tests__/HardwareId.test.mjs
 new file mode 100644
@@ -1505,10 +1514,10 @@ index 0000000..f19298e
 +});
 diff --git a/electron/update/updateFeed.ts b/electron/update/updateFeed.ts
 new file mode 100644
-index 0000000..69508d1
+index 0000000..cfa86ca
 --- /dev/null
 +++ b/electron/update/updateFeed.ts
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,434 @@
 +/**
 + * electron/update/updateFeed.ts
 + *
@@ -1549,8 +1558,45 @@ index 0000000..69508d1
 +const envRepo =
 +  typeof process !== "undefined" ? process.env?.NATIVELY_UPDATE_REPO : undefined;
 +
-+export const UPDATE_FEED_OWNER = envOwner || "with-fh";
-+export const UPDATE_FEED_REPO = envRepo || ".forkhub";
++/**
++ * Baked feed default (packaged builds only). A fork catalog build stamps
++ * its own owner/repo via `build.extraMetadata.forkhubUpdateOwner` +
++ * `build.extraMetadata.forkhubUpdateRepo` at package time, so the shipped
++ * app defaults to its own catalog without needing runtime env (packaged
++ * GUI launches typically carry none). Unstamped builds fall through to
++ * the `with-fh/.forkhub` default. Same lazy-electron pattern as
++ * readBakedBundleN below — stays importable in plain node (see tests).
++ */
++function readBakedUpdateFeed(): { owner?: string; repo?: string } {
++  try {
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const { app } = require("electron") as typeof import("electron");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const pathMod = require("path") as typeof import("path");
++    // eslint-disable-next-line @typescript-eslint/no-var-requires
++    const fsMod = require("fs") as typeof import("fs");
++    const pkg = JSON.parse(
++      fsMod.readFileSync(pathMod.join(app.getAppPath(), "package.json"), "utf8")
++    );
++    const owner = pkg?.build?.extraMetadata?.forkhubUpdateOwner;
++    const repo = pkg?.build?.extraMetadata?.forkhubUpdateRepo;
++    return {
++      owner:
++        typeof owner === "string" && normalizeUpdateOwner(owner)
++          ? normalizeUpdateOwner(owner)!
++          : undefined,
++      repo:
++        typeof repo === "string" && repo.trim() ? repo.trim() : undefined,
++    };
++  } catch {
++    return {};
++  }
++}
++
++const bakedFeed = readBakedUpdateFeed();
++
++export const UPDATE_FEED_OWNER = envOwner || bakedFeed.owner || "with-fh";
++export const UPDATE_FEED_REPO = envRepo || bakedFeed.repo || ".forkhub";
 +
 +/**
 + * ForkHub publisher override (the "which account's catalog do I update
@@ -1560,7 +1606,8 @@ index 0000000..69508d1
 + *   1. persisted override (`forkhub-updater.json` in userData — written by
 + *      the `set-update-feed-owner` IPC after catalog validation),
 + *   2. `NATIVELY_UPDATE_OWNER` env (dev / build-time),
-+ *   3. baked default (`with-fh`).
++ *   3. baked default (`build.extraMetadata.forkhubUpdateOwner`, stamped
++ *      at package time by fork catalogs; `with-fh` when unstamped).
 + *
 + * Stock installs never see fork builds and vice versa even when the user
 + * types another owner: validation (`checkPublisherCatalog`) only accepts

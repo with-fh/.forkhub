@@ -79,9 +79,11 @@ downstream concern.
 ## Non-negotiables
 
 1. **Single source of truth for the feed.** Owner/repo live in exactly
-   one module (`electron/update/updateFeed.ts`), env-overridable via
-   `NATIVELY_UPDATE_OWNER` / `NATIVELY_UPDATE_REPO`, defaulting to
-   `with-fh/.forkhub`, with a persisted publisher override on top. The
+   one module (`electron/update/updateFeed.ts`), overridable via
+   `NATIVELY_UPDATE_OWNER` / `NATIVELY_UPDATE_REPO` env, then a baked
+   `build.extraMetadata.forkhubUpdateOwner/Repo` default (stamped at
+   package time; `with-fh` ships unstamped), then the `with-fh/.forkhub`
+   hardcoded default, with a persisted publisher override on top. The
    updater (`setFeedURL`), the builder (`package.json` `publish`),
    release notes, and renderer links all read from it — no second
    hardcoded copy.
@@ -147,7 +149,12 @@ downstream concern.
   `normalizeUpdateOwner()`, `checkPublisherCatalog()` (injectable
   fetch), `applyForkFeed()` (runtime twin of the `setupAutoUpdater`
   block — `main.ts` startup untouched, the F-707 source test pins it),
-  version/tag/bundle-counter helpers.
+  version/tag/bundle-counter helpers. Resolution order is
+  persisted → `NATIVELY_UPDATE_OWNER` env → baked
+  `build.extraMetadata.forkhubUpdateOwner/Repo` (stamped at package
+  time by fork catalogs; `with-fh` ships unstamped so its default stays
+  `with-fh/.forkhub`) → hardcoded default — the `ForkPatch2Sources`
+  baked-default test pins the chain.
 - `electron/main.ts` `setupAutoUpdater()`: `setFeedURL({provider:'github',
   owner, repo})`, `channel='fh'`, `allowPrerelease=true`, fork-counter
   tiebreaks in `isRealUpgrade()`/`isVersionNewer()`, catalog-compare
