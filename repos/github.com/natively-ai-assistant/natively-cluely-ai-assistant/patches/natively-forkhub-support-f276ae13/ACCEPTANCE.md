@@ -1,8 +1,8 @@
 # Acceptance Criteria — natively-forkhub-support-f276ae13
 
-The one ForkHub-support patch for Natively (squash of update-track,
-fork-ux-and-checks, linux-dock-icon, publisher-input — no behavior
-change).
+The ForkHub update-channel patch for Natively (v2.0.0: Linux hunks
+moved downstream to ImBIOS `natively-linux-support` — no behavior
+change to the channel itself).
 
 ## Must pass for promotion to APPLIED
 
@@ -34,29 +34,12 @@ change).
    the honest not-configured copy, never a hang. Exactly one terminal
    state per manual Check; failures render in UI, never silent
    (`CalendarPkce.test.mjs`, `ForkPatch2Sources.test.mjs`).
-7. **Deterministic Linux dock identity.** userData pinned before
-   rename, rename before any window (Linux-only), `StartupWMClass`
-   contract in build config, guarded postinst hook
-   (`LinuxDockAssociation.test.mjs`).
-8. **No raw codes / no 404 fallbacks.** Friendly trial copy, catalog
+7. **No raw codes / no 404 fallbacks.** Friendly trial copy, catalog
    release-page fallback on fork feeds.
-9. **Linux system audio captures.** `pulse` backend owns
-   `#[cfg(target_os = "linux")]`; `SpeakerInput::new` succeeds, stream
-   opens the default monitor, `backend_name() == "pulse"`, fallback stub
-   no longer claims Linux unsupported (`LinuxSystemAudio.test.mjs` +
-   `cargo test speaker::linux`).
-10. **Linux open-at-login round-trips.** Enabling writes exactly one
-    `natively.desktop` entry (valid per `desktop-file-validate`,
-    `StartupWMClass=Natively`, `TryExec` = exe, quoted `Exec`);
-    reading reflects the file (ON after enable, OFF after disable,
-    OFF for missing/stale/Hidden/unparseable entries); disabling
-    deletes it; win32/darwin call shapes are unchanged
-    (`linuxAutostart.test.mjs`). v1.2.1: the written Exec is the
-    stable AppImage host path (`$APPIMAGE`), never the dead FUSE
-    mountpoint `app.getPath('exe')` returns inside an AppImage run —
-    a mountpoint entry reads OFF after relogin, prompting a healing
-    re-toggle; the stale-path suite pins this.
-11. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
+8. **No Linux hunks.** `git diff` of this patch contains no
+   `linuxAutostart`, no `speaker/linux`, no `linux.desktop`, no deb
+   hook, no Linux dock block, no hardcoded ImBIOS About strings.
+9. **Focused suites pass**: `verify.sh` exits 0. No repo-wide checks.
 
 ## How to verify
 

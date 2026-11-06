@@ -5,10 +5,13 @@
 # stays empty. See BUILD.md.
 #
 # One workflow leg per OS (see upstream.json:build_runs_on): each leg packs
-# its NATIVE installers — linux AppImage+deb, mac dmg+zip (arm64+x64,
-# unsigned), win nsis+portable (x64) — and uploads them into the SAME
-# shared updater + bundle releases (per-OS skip markers make legs resume
-# independently; FORKHUB_OS_MARKER reuse keeps one release number).
+# its NATIVE installers and uploads them into the SAME shared updater +
+# bundle releases (per-OS skip markers make legs resume independently;
+# FORKHUB_OS_MARKER reuse keeps one release number). NOTE for this
+# target: upstream.json runs mac + win only — the `linux)` case arms
+# below are dormant here (kept: this script is shared shape across
+# targets; Linux installers for Natively ship from the downstream ImBIOS
+# catalog, which layers natively-linux-support over this patch).
 #
 # The shared builder image only guarantees bun (+ node/cargo on GHA
 # runners). This target brings its own toolchain (node 22 to match
