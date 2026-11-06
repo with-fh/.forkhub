@@ -1,11 +1,11 @@
 ---
 id: natively-forkhub-support-f276ae13
-title: Natively ForkHub support (catalog update feed + publisher input + calendar + dock + linux audio + linux open-at-login)
+title: Natively ForkHub update channel (catalog feed + publisher input + resilient checks + fork calendar + OSS trial binding)
 target_repo: github.com/natively-ai-assistant/natively-cluely-ai-assistant
-target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/__tests__/LinuxDockAssociation.test.mjs, electron/services/__tests__/LinuxSystemAudio.test.mjs, electron/services/resolveCompanySearchProvider.ts, electron/utils/linuxAutostart.ts, electron/utils/__tests__/linuxAutostart.test.mjs, electron/utils/windowsTaskbarPolicy.ts, native-module/Cargo.toml, native-module/Cargo.lock, native-module/src/speaker/linux.rs, native-module/src/speaker/mod.rs, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/AboutSection.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json, scripts/deb-after-install.sh]
+target_area: [electron/update/updateFeed.ts, electron/update/updatePublisher.test.mjs, electron/update/updateFeed.test.mjs, electron/update/ReleaseNotesManager.ts, electron/update/ReleaseNotesManager.test.mjs, electron/update/UpdaterAndLifecycleIntegrity2026_08_18.test.mjs, electron/main.ts, electron/ipcHandlers.ts, electron/preload.ts, electron/services/HardwareId.ts, electron/services/__tests__/HardwareId.test.mjs, electron/services/calendarPkce.ts, electron/services/CalendarManager.ts, electron/services/__tests__/CalendarPkce.test.mjs, electron/services/__tests__/ForkPatch2Sources.test.mjs, electron/services/resolveCompanySearchProvider.ts, src/components/UpdateBanner.tsx, src/components/UpdateModal.tsx, src/components/SettingsOverlay.tsx, src/components/ui/ConnectCalendarButton.tsx, src/types/electron.d.ts, src/lib/trial/trialStart.mjs, src/lib/trial/autoTrial.mjs, src/lib/trial/__tests__/trialStart.test.mjs, package.json]
 status: applied
 applied_upstream_pr: none
-version: 1.2.1
+version: 2.0.0
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -22,8 +22,14 @@ verifies_with: node --test (focused suites, see verify.sh)
 Add ForkHub support to Natively: the single intent-patch that makes a
 stock checkout buildable and self-updating through a ForkHub catalog.
 It squashes the four original intents (update-track, fork-ux-and-checks,
-linux-dock-icon, publisher-input) with no behavior change — one patch
+publisher-input, fork calendar) with no behavior change — one patch
 per software, as the catalog intends.
+
+This patch is the ForkHub UPDATE CHANNEL. It is the only patch in
+`with-fh/.forkhub` for this target, and the `with-fh` build itself must
+stay functional with this patch alone. Linux support lives downstream
+in `ImBIOS/.forkhub` (`natively-linux-support`, `depends_on` this
+patch), so the combined ImBIOS build keeps today's behavior.
 
 1. **Catalog update feed.** The app's electron-updater feed,
    release-notes lookup, and manual-download links follow the ForkHub
@@ -36,50 +42,39 @@ per software, as the catalog intends.
    from, with a Check button above the update Check. Typing an owner,
    pressing Check validates the catalog, persists the owner, repoints
    the live updater feed, and immediately checks it.
-3. **Fork calendar + resilient checks + dual funding.** Connect calendar
-   works with a fork-owned Google client (direct PKCE flow — the stock
-   proxy holds upstream's secret); manual version Check never shows a
-   bare Error for feed problems (answers from the catalog compare);
-   Support funds both upstream and the fork maintainer; About credits
-   the fork. The fork flow sends the provisioned client secret when one
-   exists (Google rejects secretless token calls with 400
-   `client_secret is missing` — verified live 2026-10-26), so calendar
-   needs NATIVELY_GOOGLE_CLIENT_SECRET baked at package time; without it
-   the flow fails with the honest not-configured copy instead of hanging.
-4. **Linux dock identity.** Deterministic WM_CLASS / desktop-entry
-   contract so the dock shows the icon and offers pin-to-dock.
-5. **Linux system-audio capture.** The native speaker module gains a
-   PulseAudio/PipeWire monitor backend (`native-module/src/speaker/
-   linux.rs`, backend name `pulse`): the default sink's `*.monitor`
-   source is captured via ALSA (`pulse:<monitor>`), resampled to the
-   16kHz STT rate by the shared DSP loop. Without it every Linux build
-   surfaced `Unsupported platform ... macOS and Windows only` as a red
-   FATAL banner in Audio settings; with it the System Audio Level meter
-   moves and meetings transcribe system audio.
-6. **Linux open-at-login that works.** Settings -> "Open Natively when
-   you log in" writes and reads `~/.config/autostart/natively.desktop`
-   itself (`electron/utils/linuxAutostart.ts`, routed through
-   `windowsTaskbarPolicy.ts`), because Electron's login-item API is a
-   no-op on Linux and the toggle previously wrote nothing and always
-   read OFF. The entry carries `StartupWMClass=Natively` (dock
-   grouping) and `TryExec` so a removed binary is skipped, not
-   errored; IPC reports the real `{success}`. Verified live on
-   Ubuntu 24.04: toggle round-trips, the file validates with
-   `desktop-file-validate`, and the installed AppImage boots from the
-   exact `Exec` line.
+3. **Fork calendar + resilient checks.** Connect calendar works with a
+   fork-owned Google client (direct PKCE flow — the stock flow holds
+   upstream's secret); manual version Check never shows a bare Error
+   for feed problems (answers from the catalog compare). The fork flow
+   sends the provisioned client secret when one exists (Google rejects
+   secretless token calls with 400 `client_secret is missing` —
+   verified live 2026-10-26), so calendar needs
+   NATIVELY_GOOGLE_CLIENT_SECRET baked at package time; without it the
+   flow fails with the honest not-configured copy instead of hanging.
+4. **Minimum OSS-runnability (documented exception, not channel).**
+   The `with-fh` catalog builds ship WITHOUT the private `premium/`
+   submodule, so without these hunks `npm run build:electron` fails
+   (esbuild cannot resolve the bare `premium/` requires) and every
+   trial binds to the `'unavailable'` sentinel and is rejected. The
+   `HardwareId` fallback chain, the `trial:start` /
+   `license:get-hardware-id` rewiring, the `invalid_hwid` renderer
+   mapping, and the two premium try/catch guards exist so this patch
+   ALONE yields a working build — they are not Linux and not branding,
+   and they cannot move downstream without regressing the `with-fh`
+   build. Branding/credit (About maintainer card) is intentionally NOT
+   here: credit follows the update publisher dynamically and lives in
+   the downstream ImBIOS patch.
 
 ## Why
 
 Upstream hardcodes its own repo as the update feed and holds the only
 OAuth secret and the only signing keys. A patched fork that keeps those
 paths is stuck: offered stock builds over its own patches, a dead
-calendar button, an unclaimable trial, an unpinnable Linux icon, and
-a login toggle that silently does nothing on Linux. v1.2.1 resolves
-the launch path at write time: AppImage runs record `$APPIMAGE` (the
-stable host path) instead of the dead FUSE mountpoint
-`app.getPath('exe')` returns, so the entry survives logout/login.
-One ForkHub-support patch repoints all of them at the fork's own
-catalog and resources, visibly separated from stock.
+calendar button, and an unclaimable trial. One ForkHub-support patch
+repoints all of them at the fork's own catalog and resources, visibly
+separated from stock. Linux specifics (dock identity, system-audio
+capture, open-at-login, deb hook, per-publisher credit) are a separate
+downstream concern.
 
 ## Non-negotiables
 
@@ -111,44 +106,42 @@ catalog and resources, visibly separated from stock.
    install id (all SHA-256 hex shaped); it throws rather than returning
    placeholder strings, `trial:start` maps that to `invalid_hwid`
    WITHOUT burning a rate-limit slot, and no raw code reaches the UI.
-6. **Contractual dock identity, no profile moves.** The WM_CLASS both
-   sides agree on is written into the build config; userData is pinned
-   before any rename (Linux-only, pre-disguise); disguise modes still
-   rename later; macOS/Windows sequencing untouched.
-7. **Exactly one terminal state per Check.** Updater failures surface
+6. **Exactly one terminal state per Check.** Updater failures surface
    both as a rejected promise AND an async `error` event — one fallback
    run guaranteed; download-time errors still broadcast as before.
-8. **Secret required for calendar, never committed.** The fork OAuth
+7. **Secret required for calendar, never committed.** The fork OAuth
    client secret arrives only via `build.extraMetadata` (stamped at
    package time) or env, is never logged, and never appears in source.
    Calendar REQUIRES it baked: without it Google answers 400
    `client_secret is missing` (verified live), and the app surfaces the
    honest "Calendar isn't set up for this build yet" copy. Add
    NATIVELY_GOOGLE_CLIENT_SECRET in repo Settings → Secrets.
-9. **No silent UI dead-ends.** Calendar failures render under the
+8. **No silent UI dead-ends.** Calendar failures render under the
    button; manual compare with no reachable feed broadcasts instead of
    hanging; manual-download fallback never 404s (catalog release page
    on fork feeds, direct asset link only where names are predictable).
-   The open-at-login toggle reports its real result (`{success}` /
-   fail-closed `false`); a failed write never leaves the toggle ON.
-10. **No repo-wide test/typecheck runs.** Verify with the focused
-    suites in `verify.sh` only.
-11. **Exactly one open-at-login entry.** On Linux the patch writes at
-    most one file: `~/.config/autostart/natively.desktop` (honoring
-    `$XDG_CONFIG_HOME`). No per-disguise copies, no second filename —
-    a stale entry from a moved AppImage reads OFF so a re-toggle heals
-    it, and disabling deletes the file. macOS/Windows paths keep the
-    exact upstream Electron calls.
+9. **No repo-wide test/typecheck runs.** Verify with the focused
+   suites in `verify.sh` only.
+10. **Linux hunks live downstream.** This patch never touches
+    `linuxAutostart`, speaker backends, `linux.desktop`, the deb hook,
+    the Linux dock block in `main.ts`, or the About credit — those
+    belong to `ImBIOS/.forkhub` `natively-linux-support`. The
+    `with-fh` legs do not ship Linux features (no Linux leg runs
+    against this catalog build release flow for Natively).
 
 ## Implementation notes
 
 - Realized against upstream `v3.0.0` (commit `cdc6995`); squashed
   2026-10-14 from update-track v7 + fork-ux-and-checks v4 +
-  linux-dock-icon v1 + publisher-input v1 with no behavior change;
-  v1.2.0 adds Linux open-at-login (intent change, hence MINOR);
-  v1.2.1 records the stable AppImage host path instead of the dead
-  FUSE mountpoint (live QA: entry read ON but launched nothing after
-  relogin because TryExec failed on the gone mountpoint).
+  publisher-input v1 with no behavior change; fork calendar direct flow
+  added as intent change (MINOR, secret REQUIRED — secretless token
+  calls 400 at Google, verified live 2026-10-26).
+- v2.0.0 is a scope redefinition (MAJOR): the Linux hunks (dock
+  identity, system-audio backend, open-at-login entry, deb hook,
+  per-publisher About credit) move to the downstream
+  `natively-linux-support` patch in `ImBIOS/.forkhub`. Combined
+  `with-fh` + `ImBIOS` output is behavior-identical to v1.2.1 modulo
+  the About card (now dynamic per publisher) and the split test files.
 - New `electron/update/updateFeed.ts`: feed constants, persisted-owner
   override (`forkhub-updater.json` in userData), `getUpdateFeed()`,
   `normalizeUpdateOwner()`, `checkPublisherCatalog()` (injectable
@@ -158,18 +151,8 @@ catalog and resources, visibly separated from stock.
 - `electron/main.ts` `setupAutoUpdater()`: `setFeedURL({provider:'github',
   owner, repo})`, `channel='fh'`, `allowPrerelease=true`, fork-counter
   tiebreaks in `isRealUpgrade()`/`isVersionNewer()`, catalog-compare
-  fallback for manual Checks; Linux-only userData pin + rename.
+  fallback for manual Checks.
 - `electron/services/HardwareId.ts` (new): ordered HWID resolution.
-- `electron/utils/linuxAutostart.ts` (new): XDG Autostart entry
-  manager (`~/.config/autostart/natively.desktop`, `$XDG_CONFIG_HOME`
-  honored, `StartupWMClass=Natively`, `TryExec` guard);
-  `windowsTaskbarPolicy.ts` routes `linux` through it while
-  win32/darwin keep the exact upstream Electron calls; `ipcHandlers`
-  `set-open-at-login` reports the real `{success}` and
-  `get-open-at-login` is fail-closed. Tests:
-  `electron/utils/__tests__/linuxAutostart.test.mjs` (entry shape,
-  toggle round-trip, stale-entry healing, Hidden/unparseable handling,
-  HOME fallback, linux/darwin routing — in `verify.sh`).
 - `electron/services/calendarPkce.ts` (new): direct PKCE exchange /
   refresh (secret forwarded when provisioned — REQUIRED, Google 400s
   without it); `CalendarManager` fork-id resolution (baked
@@ -177,12 +160,6 @@ catalog and resources, visibly separated from stock.
   direct). Connect opens the browser when a client id exists; a missing
   or rejected secret surfaces the named not-configured error under the
   button via the callback error path, never a hang.
-- `native-module/src/speaker/linux.rs` (new): PulseAudio/PipeWire
-  monitor backend (`pulse`); `mod.rs` owns it on
-  `#[cfg(target_os = "linux")]`, fallback stub covers remaining
-  platforms only. `Cargo.toml` pins the shared `alsa = "=0.9.1"`
-  (cpal 0.15's own version — one alsa-sys linkage). No new system
-  dependency: libasound + pactl shell-out only.
 - `electron/ipcHandlers.ts`: `trial:start` + `license:get-hardware-id`
   via HardwareId; `get-update-feed` + `set-update-feed-owner`
   (validate → persist → repoint live `autoUpdater` → `{ok, owner,
@@ -190,22 +167,20 @@ catalog and resources, visibly separated from stock.
 - Renderer: `UpdateBanner`/`UpdateModal` feed-driven fallbacks,
   `SettingsOverlay` publisher row above Version (input + Check +
   valid/invalid status + persisted caption, successful Check
-  auto-runs update Check), `AboutSection` dual-support + maintainer
-  card, `ConnectCalendarButton` error state, trial `invalid_hwid` →
-  friendly copy.
-- `package.json` `build.publish`: `with-fh/.forkhub`; `linux.desktop`
-  `StartupWMClass`, `deb.afterInstall` hook, deb maintainer stamped at
-  build time.
+  auto-runs update Check), `ConnectCalendarButton` error state, trial
+  `invalid_hwid` → friendly copy.
+- `package.json` `build.publish`: `with-fh/.forkhub` (the `linux`
+  desktop/deb stanzas live downstream).
 - Open-source build fixes: premium bare-branch `require()`s wrapped in
   try/catch, type-only premium imports localized (byte-identical with
   premium present).
 - Linux CI lives beside the patch (`../build/build.sh`, `publish.sh`,
-  `BUILD.md`, `CONSUME.md`, `triggers.md`, `../upstream.json`):
-  per-OS legs (linux AppImage+deb, mac dmg+zip unsigned, win
-  nsis+portable unsigned) into one shared updater release.
+  `BUILD.md`, `CONSUME.md`, `triggers.md`, `../upstream.json`): per-OS
+  legs (mac dmg+zip unsigned, win nsis+portable unsigned) into one
+  shared updater release. The `with-fh` build does NOT run a Linux leg
+  for Natively (no `ubuntu-latest` entry for this target's release
+  flow); Linux installers ship from the downstream ImBIOS catalog.
 - Tests: `updateFeed` + `updatePublisher` + `ReleaseNotesManager` +
-  `HardwareId` + `CalendarPkce` + `ForkPatch2Sources` +
-  `LinuxDockAssociation` + `LinuxSystemAudio` focused suites; `cargo
-  test speaker::linux` (name/pcm-name units) + live napi monitor
-  smoke (silence keepalive + tone loopback) verified during
-  development.
+  `HardwareId` + `CalendarPkce` + `ForkPatch2Sources` focused suites;
+  `windowsTaskbarPolicy.test.mjs` (upstream-owned, unmodified) runs as
+  a regression guard.
