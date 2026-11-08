@@ -8,12 +8,10 @@
   "last_synced_at": "2026-11-06T00:00:00.000Z",
   "schedule": "on-upstream-release",
   "version_suffix": "fh",
-  "build_runs_on": [
-    "macos-26",
-    "windows-latest"
-  ],
+  "build_runs_on": [],
   "build_skip_markers": {
     "mac": "*.dmg",
     "win": "*.exe"
-  }
+  },
+  "build_note": "DRAFT scaffold: no legs until the real channel patch lands (fh draft). Restored to [macos-26, windows-latest] on realization."
 }
