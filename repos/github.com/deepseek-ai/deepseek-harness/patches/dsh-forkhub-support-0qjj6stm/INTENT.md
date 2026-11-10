@@ -13,7 +13,7 @@ owners: [Imamuzzaki Abu Salam]
 source_url: null
 imported_at: null
 created: 2026-11-10
-last_realized_against_commit: fcc0ad4
+last_realized_against_commit: 66491b05e3
 verifies_with: bun test
 ---
 
@@ -68,7 +68,7 @@ per-publisher credit) are a separate downstream concern in ImBIOS
 
 ## Implementation notes
 
-- Realized against upstream master `fcc0ad4` (merge of `dsh-v0.2.2-rc.1`);
+- Realized against upstream tag `dsh-v0.2.2-rc.1` (`66491b0`, the tag the catalog builds);
   277k stars (>= 2k gate).
 - New `apps/desktop/src/updateFeed.ts`: feed constants, persisted-owner
   override, `getUpdateFeed()`, `normalizeUpdateOwner()`,
