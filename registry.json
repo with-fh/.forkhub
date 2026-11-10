@@ -41,6 +41,34 @@
           "tagMatch": "^v[0-9]+\\.[0-9]+\\.[0-9]+-fh\\."
         }
       }
+    },
+    "dsh": {
+      "target": "github.com/deepseek-ai/deepseek-harness",
+      "description": "DeepSeek Harness Desktop x ForkHub update channel for Windows + macOS (Linux served by the ImBIOS catalog; needs 277k★ upstream, channel patch draft until fh draft realization)",
+      "bin": "dsh",
+      "defaultChannel": "stable",
+      "asset": "dsh-{version}.exe",
+      "assets": {
+        "win32-x64": "dsh-{version}.exe",
+        "darwin-arm64": "dsh-{version}-arm64.dmg",
+        "darwin-x64": "dsh-{version}-x64.dmg"
+      },
+      "binPaths": {
+        "win32-x64": "{asset}",
+        "darwin-arm64": "{asset}",
+        "darwin-x64": "{asset}"
+      },
+      "extract": "none",
+      "platforms": [
+        "win32-x64",
+        "darwin-arm64",
+        "darwin-x64"
+      ],
+      "channels": {
+        "stable": {
+          "tagMatch": "^v[0-9]+\\.[0-9]+\\.[0-9]+-fh\\."
+        }
+      }
     }
   }
 }
