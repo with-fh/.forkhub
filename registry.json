@@ -8,13 +8,37 @@
       "binPath": "package/t3",
       "defaultChannel": "nightly",
       "asset": "{owner}-fh-t3-{version}.tgz",
-      "platforms": ["linux-x64"],
+      "platforms": [
+        "linux-x64"
+      ],
       "channels": {
         "nightly": {
           "tagMatch": "-nightly\\.[0-9]{8}\\."
         },
         "stable": {
           "tagMatch": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
+    },
+    "natively": {
+      "target": "github.com/Natively-AI-assistant/natively-cluely-ai-assistant",
+      "description": "Natively x ForkHub update channel for Windows (Linux served by the ImBIOS catalog; macOS via the in-app updater for now)",
+      "bin": "Natively",
+      "defaultChannel": "stable",
+      "asset": "Natively.{version}.exe",
+      "assets": {
+        "win32-x64": "Natively.{version}.exe"
+      },
+      "binPaths": {
+        "win32-x64": "{asset}"
+      },
+      "extract": "none",
+      "platforms": [
+        "win32-x64"
+      ],
+      "channels": {
+        "stable": {
+          "tagMatch": "^v[0-9]+\\.[0-9]+\\.[0-9]+-fh\\."
         }
       }
     }

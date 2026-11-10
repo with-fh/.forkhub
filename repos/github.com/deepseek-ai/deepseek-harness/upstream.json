@@ -1,0 +1,17 @@
+{
+  "upstream_url": "https://github.com/deepseek-ai/deepseek-harness.git",
+  "upstream_main_branch": "master",
+  "upstream_remote": "upstream",
+  "fork_url": "git@github.com:ImBIOS/deepseek-harness.git",
+  "fork_remote": "origin",
+  "last_known_upstream_sha": "dsh-v0.2.2-rc.1",
+  "last_synced_at": "2026-11-06T00:00:00.000Z",
+  "schedule": "on-upstream-release",
+  "version_suffix": "fh",
+  "build_runs_on": [],
+  "build_skip_markers": {
+    "mac": "*.dmg",
+    "win": "*.exe"
+  },
+  "build_note": "DRAFT scaffold: no legs until the real channel patch lands (fh draft). Restored to [macos-26, windows-latest] on realization."
+}

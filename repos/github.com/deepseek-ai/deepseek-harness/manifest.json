@@ -1,0 +1,27 @@
+{
+  "target_repo": "github.com/deepseek-ai/deepseek-harness",
+  "upstream_main_branch": "master",
+  "upstream_remote": "upstream",
+  "fork_remote": "origin",
+  "is_fork": true,
+  "schedule": "on-upstream-release",
+  "token_budget_per_run": 200000,
+  "on_budget_exceed": "pause",
+  "patches": {
+    "dsh-forkhub-support-placeholder": {
+      "status": "draft",
+      "version": "0.1.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "dsh/forkhub-support",
+      "last_realized_against_commit": null,
+      "note": "PLACEHOLDER \u2014 real INTENT lands via fh draft against dsh-v0.2.2-rc.1; captures the required shape (274k stars >= 2k gate)"
+    }
+  },
+  "apply_order": [
+    "dsh-forkhub-support-placeholder"
+  ],
+  "slug_aliases": {
+    "dsh-forkhub-support": "dsh-forkhub-support-placeholder"
+  }
+}
