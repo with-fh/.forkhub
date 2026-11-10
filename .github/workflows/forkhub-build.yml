@@ -168,8 +168,19 @@ jobs:
           IGNORE=$(jq -r '.tag_ignore_pattern // empty' "$UJSON")
           [ -n "$MATCH" ] || MATCH="$TRAIN_MATCH"
           [ -n "$IGNORE" ] || IGNORE="$TRAIN_IGNORE"
-          TAGS=$(git ls-remote --tags --sort=-v:refname "$URL" \
-            | grep -io 'refs/tags/v[^^{}]*' | cut -d/ -f3 || true)
+          # Tag pool: `refs/tags/v*` by default; a per-target
+          # `tag_pool_prefix` (e.g. `"dsh-v"` for deepseek-harness, whose
+          # tags never start with bare `v`) widens the pool to that
+          # literal prefix instead. The per-target MATCH still decides.
+          POOL_PREFIX=$(jq -r '.tag_pool_prefix // empty' "$UJSON")
+          if [ -n "$POOL_PREFIX" ]; then
+            POOL_RX=$(printf '%s' "$POOL_PREFIX" | sed 's/[^A-Za-z0-9_-]/\\&/g')
+            TAGS=$(git ls-remote --tags --sort=-v:refname "$URL" \
+              | grep -io "refs/tags/${POOL_RX}[^{}]*" | cut -d/ -f3 || true)
+          else
+            TAGS=$(git ls-remote --tags --sort=-v:refname "$URL" \
+              | grep -io 'refs/tags/v[^^{}]*' | cut -d/ -f3 || true)
+          fi
           # NOTE: the tag pool is case-insensitive (-i) so capital-V tags
           # (e.g. upstream Natively's V2.8.8) are visible, and the final
           # pick orders by lowercased version so the newest tag wins
