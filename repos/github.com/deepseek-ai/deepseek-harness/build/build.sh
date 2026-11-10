@@ -146,11 +146,10 @@ fi
 say "pnpm install"
 pnpm install --frozen-lockfile >>"$LOG" 2>&1 || fail_soft "pnpm install failed (see BUILD_LOG.md)"
 
-# --- verify gate (focused suites only — full CI stays upstream's job) ---
-say "verify gate"
-sh repos/github.com/deepseek-ai/deepseek-harness/patches/dsh-forkhub-support-0qjj6stm/verify.sh >>"$LOG" 2>&1 \
-  || fail_soft "verify gate failed (see BUILD_LOG.md)"
-
+# NOTE: no verify gate here — the shared workflow's apply step already ran
+# verify.sh on this exact tree (failure triages to reimplement and skips
+# the build). Re-running it here would need catalog-relative paths that
+# don't exist in the build checkout.
 # --- stamp the ForkHub provenance version + catalog owner ---
 # The version extends the product prerelease in native <base>.<date>.<n>
 # form with the owner folded in (see BUILD.md) — the build validator
