@@ -174,6 +174,13 @@ export DSH_DESKTOP_BUILD_VERSION="$FH_VERSION"
 # --publish never pack (no upload, no COS, no signing), they only satisfy
 # the settings/policy validators.
 if [ "$OS_KEY" = "win" ]; then
+  # GNU tar on GHA windows runners reads the colon in an absolute path
+  # (D:\...) as a remote-host separator (upstream's own toolchain probe
+  # documents this; their self-hosted runner avoids it). --force-local
+  # makes GNU tar treat archive names as local files; libarchive bsdtar
+  # ignores the env var and opens drive-letter paths natively. Either
+  # way prepare-package-set.ts can read its tarballs.
+  export TAR_OPTIONS="--force-local"
   say "writing unsigned-pack .env.windows (test deployment, never contacted)"
   cat > apps/desktop/.env.windows <<'DOTENV'
 DSH_DESKTOP_APP_ID=com.deepseek.harness
