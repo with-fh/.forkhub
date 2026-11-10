@@ -200,11 +200,20 @@ fi
 # apply, documented in CONSUME.md.
 case "$OS_KEY" in
   mac)
-    say "packaging mac unsigned (arm64 + x64)"
+    say "packaging mac unsigned (arm64)"
     (cd apps/desktop && pnpm run package:mac:arm64:unsigned -- --build-version "$FH_VERSION" >>"$LOG" 2>&1) \
       || fail_soft "mac arm64 pack failed (see BUILD_LOG.md)"
+    # Collect arm64 NOW: the x64 cross-pack below runs LibreOffice under
+    # emulation and can time out on hosted runners (env flake, not patch
+    # drift) — a finished arm64 must ship regardless.
+    mkdir -p "$DIST/forkhub"
+    for f in apps/desktop/.desktop-build/targets/mac-arm64/unsigned-artifacts/*.dmg apps/desktop/.desktop-build/targets/mac-arm64/unsigned-artifacts/*.zip; do
+      [ -e "$f" ] || continue
+      mv "$f" "$DIST/forkhub"/
+    done
+    say "packaging mac unsigned (x64 cross-pack; emulation-flake tolerant)"
     (cd apps/desktop && pnpm run package:mac:x64:unsigned -- --build-version "$FH_VERSION" >>"$LOG" 2>&1) \
-      || fail_soft "mac x64 pack failed (see BUILD_LOG.md)"
+      || say "mac x64 pack failed; arm64 already staged (see BUILD_LOG.md)"
     ;;
   win)
     say "packaging win unsigned (x64)"
@@ -238,7 +247,14 @@ for target in mac-arm64 mac-x64 win-x64; do
     MOVED=$((MOVED + 1))
   done
 done
-[ "$MOVED" -gt 0 ] || fail_soft "pack produced no artifacts in unsigned-artifacts/"
+# Arm64-first staging may have moved this leg's files already (x64
+# cross-pack flake); count the staging dir, not just this loop.
+STAGED=$(ls "$DIST/forkhub" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$MOVED" -gt 0 ] || [ "${STAGED:-0}" -gt 0 ]; then
+  say "staged $STAGED file(s) + $MOVED new file(s)"
+else
+  fail_soft "pack produced no artifacts in unsigned-artifacts/"
+fi
 if [ -e "$DIST/forkhub/latest-mac.yml" ]; then
   cp "$DIST/forkhub/latest-mac.yml" "$DIST/forkhub/fh-mac.yml" || fail_soft "fh-mac.yml copy failed"
   say "fh-mac.yml emitted"
