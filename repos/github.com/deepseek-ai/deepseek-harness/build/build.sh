@@ -167,6 +167,25 @@ say "stamping version $FH_VERSION + owner $OWNER"
 export DSH_UPDATE_OWNER="$OWNER"
 export DSH_DESKTOP_BUILD_VERSION="$FH_VERSION"
 
+# --- unsigned-pack dotenv (CI has no machine presets or local files) ---
+# Upstream pack reads apps/desktop/.env.windows (win) for file-owned
+# settings; only mac unsigned has a codeless local env. Write a minimal
+# test-deployment file: values are never contacted by an unsigned,
+# --publish never pack (no upload, no COS, no signing), they only satisfy
+# the settings/policy validators.
+if [ "$OS_KEY" = "win" ]; then
+  say "writing unsigned-pack .env.windows (test deployment, never contacted)"
+  cat > apps/desktop/.env.windows <<'DOTENV'
+DSH_DESKTOP_APP_ID=com.deepseek.harness
+DSH_DESKTOP_AUTO_UPDATE_ENV=test
+DOWNLOAD_TEST_ORIGIN=https://localhost/
+DOWNLOAD_TEST_RELEASE_ID=00000000000000000000000000000000
+DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://localhost/
+DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://localhost/
+DSH_DESKTOP_MANDATORY_UPDATE_CONFIG={"allowedAuthOrigins":["https://localhost/"]}
+DOTENV
+fi
+
 # --- pack the unsigned installer for this leg ---
 # Unsigned (no certs in this catalog): mac needs no Developer ID action
 # (the stock pack path just works unsigned for local builds via
