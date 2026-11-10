@@ -31,10 +31,25 @@ index 27a7f92c7f..48dcd1043b 100644
      ...(environment.DSH_DESKTOP_UPDATE_CHANNEL === undefined ? {} : { DSH_DESKTOP_UPDATE_CHANNEL: environment.DSH_DESKTOP_UPDATE_CHANNEL }),
      ...(preset === undefined ? {} : { DSH_PACKAGING_PRESET: preset }),
 diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
-index cf0c19e895..942f6ad8ce 100644
+index cf0c19e895..c57d8ebc58 100644
 --- a/apps/desktop/scripts/electron-builder-config.mjs
 +++ b/apps/desktop/scripts/electron-builder-config.mjs
-@@ -110,6 +110,9 @@ export function createElectronBuilderConfig(
+@@ -96,7 +96,13 @@ export function createElectronBuilderConfig(
+   if (windowsSigner !== undefined) {
+     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
+   }
+-  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // ForkHub catalog builds (DSH_UPDATE_OWNER set by the catalog build.sh)
++  // always carry an update feed — even unsigned: the feed is a GitHub
++  // releases catalog, not the COS deployment, so no upload credentials
++  // or signing are involved. Stock unsigned local builds keep update
++  // undefined (no feed), exactly as before.
++  const forkhubOwner = unsigned ? process.env.DSH_UPDATE_OWNER?.trim() || undefined : undefined
++  const update = !unsigned ? resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch) : undefined
+   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
+   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
+@@ -110,6 +116,9 @@ export function createElectronBuilderConfig(
      extraMetadata: {
        dshDesktopAppId: appId,
        dshDesktopUpdateChannel: update?.channel ?? 'nightly',
@@ -44,6 +59,16 @@ index cf0c19e895..942f6ad8ce 100644
        ...(policy === undefined ? {} : { dshMandatoryUpdatePolicy: policy }),
        ...buildVersion === productVersion ? {} : { version: buildVersion },
        ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
+@@ -269,6 +278,8 @@ export function createElectronBuilderConfig(
+       differentialPackage: true,
+     },
+     detectUpdateChannel: false,
+-    publish: update === undefined ? null : [{ provider: 'generic', url: update.publicUrl, channel: update.channel }],
++    publish: forkhubOwner !== undefined
++      ? [{ provider: 'github', owner: forkhubOwner, repo: '.forkhub', channel: 'latest' }]
++      : update === undefined ? null : [{ provider: 'generic', url: update.publicUrl, channel: update.channel }],
+   }
+ }
 diff --git a/apps/desktop/src/forkVersion.ts b/apps/desktop/src/forkVersion.ts
 new file mode 100644
 index 0000000000..0ee034b9fa
