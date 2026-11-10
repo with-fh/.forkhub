@@ -131,8 +131,17 @@ else
   mkdir -p "$NODE_DIR"
   curl -fsSL "https://nodejs.org/download/release/$NODE_TAG/node-$NODE_TAG-$NODE_PLAT-$NODE_ARCH.$NODE_EXT" \
     -o "$NODE_DIR/node-pkg.$NODE_EXT" || fail_soft "node 24 download failed"
-  tar -xf "$NODE_DIR/node-pkg.$NODE_EXT" -C "$NODE_DIR" || fail_soft "node 24 extract failed"
-  export PATH="$NODE_DIR/node-$NODE_TAG-$NODE_PLAT-$NODE_ARCH/bin:$NODE_DIR/node-$NODE_TAG-$NODE_PLAT-$NODE_ARCH:$PATH"
+  case "$NODE_EXT" in
+    zip)
+      # Windows runners lack tar xz support; node ships a zip for win.
+      (cd "$NODE_DIR" && (unzip -q -o "node-pkg.$NODE_EXT" || powershell -NoProfile -Command "Expand-Archive -Force 'node-pkg.$NODE_EXT' .")) || fail_soft "node 24 extract failed"
+      export PATH="$NODE_DIR/node-$NODE_TAG-$NODE_PLAT-$NODE_ARCH:$PATH"
+      ;;
+    *)
+      tar -xf "$NODE_DIR/node-pkg.$NODE_EXT" -C "$NODE_DIR" || fail_soft "node 24 extract failed"
+      export PATH="$NODE_DIR/node-$NODE_TAG-$NODE_PLAT-$NODE_ARCH/bin:$NODE_DIR/node-$NODE_TAG-$NODE_PLAT-$NODE_ARCH:$PATH"
+      ;;
+  esac
   say "node $(node --version) provisioned"
 fi
 if command -v pnpm >/dev/null 2>&1; then
