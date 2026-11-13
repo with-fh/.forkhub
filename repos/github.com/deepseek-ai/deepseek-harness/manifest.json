@@ -15,15 +15,15 @@
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "dsh/forkhub-support",
       "last_realized_against_commit": null,
-      "note": "PLACEHOLDER — real INTENT lands via fh draft against dsh-v0.2.2-rc.1; captures the required shape (274k stars >= 2k gate)"
+      "note": "PLACEHOLDER \u2014 real INTENT lands via fh draft against dsh-v0.2.2-rc.1; captures the required shape (274k stars >= 2k gate)"
     },
     "dsh-forkhub-support-0qjj6stm": {
       "status": "applied",
-      "version": "1.0.0",
+      "version": 2,
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "dsh/forkhub-support",
-      "last_realized_against_commit": "66491b05e3",
+      "last_realized_against_commit": "ddac96760b6e0df8fa0fe17cbdcf0b512f4c12b2c",
       "note": "Realized against upstream master fcc0ad4 (merge of dsh-v0.2.2-rc.1); 277k stars >= 2k gate",
       "target_area": [
         "apps/desktop/scripts/desktop-package-environment.mjs",
@@ -45,7 +45,8 @@
         "packages/client/ui-settings-general/src/client/locales.ts",
         "packages/client/ui-settings-general/src/types.ts",
         "packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts"
-      ]
+      ],
+      "last_realized_against_tag": "dsh-v0.2.2-rc.2"
     }
   },
   "apply_order": [

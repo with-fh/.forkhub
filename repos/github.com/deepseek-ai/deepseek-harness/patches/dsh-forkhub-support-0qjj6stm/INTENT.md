@@ -13,7 +13,8 @@ owners: [Imamuzzaki Abu Salam]
 source_url: null
 imported_at: null
 created: 2026-11-10
-last_realized_against_commit: 66491b05e3
+last_realized_against_commit: ddac96760b6e0df8fa0fe17cbdcf0b512f4c12b2c
+realized_against_tag: dsh-v0.2.2-rc.2
 verifies_with: bun test
 ---
 
