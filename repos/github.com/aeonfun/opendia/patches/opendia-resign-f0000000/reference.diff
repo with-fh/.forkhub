@@ -1,0 +1,13 @@
+diff --git a/opendia-extension/manifest-firefox.json b/opendia-extension/manifest-firefox.json
+index 61bc105..53807d7 100644
+--- a/opendia-extension/manifest-firefox.json
++++ b/opendia-extension/manifest-firefox.json
+@@ -5,7 +5,7 @@
+   "description": "Connect your browser to AI models",
+   "applications": {
+     "gecko": {
+-      "id": "opendia@aaronjmars.com",
++      "id": "{22b9fd82-342c-46ab-a615-888115ffc841}",
+       "strict_min_version": "109.0"
+     }
+   },

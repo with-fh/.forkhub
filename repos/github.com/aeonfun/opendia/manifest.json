@@ -1,0 +1,27 @@
+{
+  "target_repo": "github.com/aeonfun/opendia",
+  "upstream_main_branch": "main",
+  "upstream_remote": "upstream",
+  "fork_remote": "origin",
+  "is_fork": false,
+  "schedule": "on-upstream-release",
+  "token_budget_per_run": 50000,
+  "on_budget_exceed": "pause",
+  "patches": {
+    "opendia-resign-f0000000": {
+      "status": "applied",
+      "version": "1.0.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "opendia/resign",
+      "last_realized_against_commit": "v1.1.4",
+      "note": "Mechanical re-sign: swap upstream add-on ID (owned by aeonfun AMO account, 403s on our keys) for the catalog-owned UUID, so `web-ext sign --channel=unlisted` registers under our AMO account. No behavioral change."
+    }
+  },
+  "apply_order": [
+    "opendia-resign-f0000000"
+  ],
+  "slug_aliases": {
+    "opendia-resign": "opendia-resign-f0000000"
+  }
+}

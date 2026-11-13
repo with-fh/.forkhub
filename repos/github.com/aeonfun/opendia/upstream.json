@@ -1,0 +1,17 @@
+{
+  "upstream_url": "https://github.com/aeonfun/opendia.git",
+  "upstream_main_branch": "main",
+  "upstream_remote": "upstream",
+  "fork_url": "git@github.com:with-fh/opendia.git",
+  "fork_remote": "origin",
+  "last_known_upstream_sha": "v1.1.4",
+  "last_synced_at": "2026-11-13T00:00:00.000Z",
+  "schedule": "on-upstream-release",
+  "version_suffix": "fh",
+  "tag_pool_prefix": "v",
+  "build_runs_on": [
+    "ubuntu-latest"
+  ],
+  "build_skip_markers": {},
+  "build_note": "Single-leg resign pipeline: no native build. build.sh downloads the upstream opendia-firefox-*.zip, swaps the add-on ID to the catalog-owned UUID, and submits to AMO via web-ext sign --channel=unlisted. Sunset: when upstream ships a signed XPI (>=1 asset containing META-INF/mozilla.sf), this entry is deprecated (see build/triggers.md)."
+}

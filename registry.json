@@ -69,6 +69,21 @@
           "tagMatch": "^v[0-9]+\\.[0-9]+\\.[0-9]+-fh\\."
         }
       }
+    },
+    "opendia": {
+      "target": "github.com/aeonfun/opendia",
+      "description": "OpenDia x ForkHub channel: Mozilla-signed Firefox XPI (re-ID + unlisted sign, until upstream ships one)",
+      "bin": "opendia",
+      "asset": "opendia-firefox.{version}.xpi",
+      "platforms": [
+        "linux-x64"
+      ],
+      "defaultChannel": "stable",
+      "channels": {
+        "stable": {
+          "tagMatch": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
     }
   }
 }
