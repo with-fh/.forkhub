@@ -1,0 +1,1027 @@
+diff --git a/apps/desktop/scripts/desktop-package-environment.mjs b/apps/desktop/scripts/desktop-package-environment.mjs
+index 27a7f92c7f..48dcd1043b 100644
+--- a/apps/desktop/scripts/desktop-package-environment.mjs
++++ b/apps/desktop/scripts/desktop-package-environment.mjs
+@@ -19,6 +19,9 @@ const SHARED_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|NPM_REGISTRY|M
+ const WINDOWS_SETTING = /^DSH_DESKTOP_WINDOWS_(?:CER_FILE|SIGNTOOL|KEY_CONTAINER|TOKEN_PIN|SIGNATURE_CACHE_DIR|SIGNATURE_CACHE_CONCURRENCY|PACK_CONCURRENCY|COMPRESSION_LEVEL)$/u
+ const MACOS_SETTING = /^(?:DSH_DESKTOP_MACOS_(?:SIGNING_IDENTITY|TEAM_ID|SIGNATURE_CACHE_DIR|PACK_CONCURRENCY|ZIP_COMPRESSION_LEVEL|DOWNLOAD_PROXY|NOTARIZATION_PROXY)|APPLE_(?:API_KEY|API_KEY_ID|API_ISSUER|ID|APP_SPECIFIC_PASSWORD|TEAM_ID|KEYCHAIN|KEYCHAIN_PROFILE)|CSC_(?:LINK|KEY_PASSWORD))$/u
+ const AMBIENT_RELEASE_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|MANDATORY_UPDATE_.*|WINDOWS_.*|MACOS_.*)|APPLE_.*|(?:WIN_)?CSC_.*|DOWNLOAD_(?:TEST|PROD)_.*)$/iu
++
++/** Owner stamp for ForkHub catalog builds; never a release secret, always survives the ambient strip. */
++const AMBIENT_KEEP_SETTING = /^DSH_UPDATE_OWNER$/u
+ const FILE_SETTINGS = ['DSH_DESKTOP_WINDOWS_CER_FILE', 'DSH_DESKTOP_WINDOWS_SIGNTOOL', 'APPLE_API_KEY', 'APPLE_KEYCHAIN', 'CSC_LINK']
+ 
+ /**
+@@ -28,7 +31,7 @@ const FILE_SETTINGS = ['DSH_DESKTOP_WINDOWS_CER_FILE', 'DSH_DESKTOP_WINDOWS_SIGN
+  */
+ export function localMacOSPackageEnvironment(environment = process.env) {
+   return {
+-    ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name))),
++    ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name) || AMBIENT_KEEP_SETTING.test(name))),
+     DSH_DESKTOP_APP_ID: 'com.deepseek.harness',
+     DSH_DESKTOP_UNSIGNED: '1',
+   }
+@@ -94,7 +97,7 @@ export function loadDesktopPackageEnvironment(platform, environment = process.en
+     settings.DOWNLOAD_TEST_RELEASE_ID = releaseId
+   }
+   return {
+-    ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name))),
++    ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name) || AMBIENT_KEEP_SETTING.test(name))),
+     ...settings,
+     ...(environment.DSH_DESKTOP_UPDATE_CHANNEL === undefined ? {} : { DSH_DESKTOP_UPDATE_CHANNEL: environment.DSH_DESKTOP_UPDATE_CHANNEL }),
+     ...(preset === undefined ? {} : { DSH_PACKAGING_PRESET: preset }),
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index cf0c19e895..c57d8ebc58 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -96,7 +96,13 @@ export function createElectronBuilderConfig(
+   if (windowsSigner !== undefined) {
+     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
+   }
+-  const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
++  // ForkHub catalog builds (DSH_UPDATE_OWNER set by the catalog build.sh)
++  // always carry an update feed — even unsigned: the feed is a GitHub
++  // releases catalog, not the COS deployment, so no upload credentials
++  // or signing are involved. Stock unsigned local builds keep update
++  // undefined (no feed), exactly as before.
++  const forkhubOwner = unsigned ? process.env.DSH_UPDATE_OWNER?.trim() || undefined : undefined
++  const update = !unsigned ? resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch) : undefined
+   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
+   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
+@@ -110,6 +116,9 @@ export function createElectronBuilderConfig(
+     extraMetadata: {
+       dshDesktopAppId: appId,
+       dshDesktopUpdateChannel: update?.channel ?? 'nightly',
++      // ForkHub catalogs stamp their owner at package time (with-fh ships
++      // unstamped so its default stays with-fh/.forkhub). Baked default only.
++      ...(process.env.DSH_UPDATE_OWNER?.trim() ? { forkhubUpdateOwner: process.env.DSH_UPDATE_OWNER.trim() } : {}),
+       ...(policy === undefined ? {} : { dshMandatoryUpdatePolicy: policy }),
+       ...buildVersion === productVersion ? {} : { version: buildVersion },
+       ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
+@@ -269,6 +278,8 @@ export function createElectronBuilderConfig(
+       differentialPackage: true,
+     },
+     detectUpdateChannel: false,
+-    publish: update === undefined ? null : [{ provider: 'generic', url: update.publicUrl, channel: update.channel }],
++    publish: forkhubOwner !== undefined
++      ? [{ provider: 'github', owner: forkhubOwner, repo: '.forkhub', channel: 'latest' }]
++      : update === undefined ? null : [{ provider: 'generic', url: update.publicUrl, channel: update.channel }],
+   }
+ }
+diff --git a/apps/desktop/src/forkVersion.ts b/apps/desktop/src/forkVersion.ts
+new file mode 100644
+index 0000000000..0ee034b9fa
+--- /dev/null
++++ b/apps/desktop/src/forkVersion.ts
+@@ -0,0 +1,60 @@
++/** ForkHub rebuild identity: fork versions extend the product prerelease in
++ * DSH's native `<base>.<date>.<n>` form, with the ForkHub owner folded into
++ * a dedicated owner field as `<base>.<owner>.<date8>.<n>` (e.g.
++ * `0.2.2-rc.1.with-fh.20261110.1`, which the DSH build validator accepts
++ * because it still extends the product prerelease before the owner field).
++ * Pure-numeric date/counter fields keep semver precedence exact
++ * (numeric < alphanumeric, so a stock date-build never outranks a fork
++ * build by accident); same-owner rebuilds order by the trailing counter
++ * within one date, stock<->fork and cross-owner pairs refuse. The updater
++ * allows prereleases on a feed that contains ONLY fork builds. Upstream has
++ * no `.forkhub` repo, so stock builds never see fork builds and vice versa.
++ */
++
++const FORK_PATTERN = /^(.+?)\.((?=[a-zA-Z0-9-]{1,39}\.)(?:[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*))\.(\d{8})\.(\d+)$/
++
++export type ForkIdentity = { base: string; owner: string; date: string; counter: number } | null
++
++/**
++ * Split `<base>.<owner>.<date8>.<n>` into its parts; anything else (stock,
++ * upstream `dsh-v*` tags, date-builds without an owner field) yields null.
++ * The owner field is what distinguishes a fork build from a stock
++ * date-build, so same-shape comparisons stay exact.
++ */
++export function parseForkVersion(version: string): ForkIdentity {
++  const match = FORK_PATTERN.exec(version.trim())
++  if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined || match[4] === undefined) {
++    return null
++  }
++  const counter = Number.parseInt(match[4], 10)
++  if (!Number.isSafeInteger(counter)) return null
++  return { base: match[1], owner: match[2].toLowerCase(), date: match[3], counter }
++}
++
++/**
++ * Whether a fork build may install over the current install. Same-owner,
++ * same-date rebuilds order by counter; stock↔fork and cross-owner pairs
++ * refuse. Stock→stock stays governed by the caller's semver compare.
++ */
++export function isForkCounterUpgrade(current: string, candidate: string): boolean {
++  const from = parseForkVersion(current)
++  const to = parseForkVersion(candidate)
++  if (from === null || to === null) return false
++  if (from.owner !== to.owner || from.base !== to.base || from.date !== to.date) return false
++  return to.counter > from.counter
++}
++
++/** True when both versions are stock (no fork suffix on either side). */
++export function isStockPair(current: string, candidate: string): boolean {
++  return parseForkVersion(current) === null && parseForkVersion(candidate) === null
++}
++
++/**
++ * The `channel: 'latest'` gate refuses prereleases; a fork feed serves
++ * owner-stamped prereleases by design, so the check must accept a
++ * same-owner counter upgrade on the ForkHub feed.
++ */
++export function isVersionAllowedOnForkFeed(current: string, candidate: string): boolean {
++  if (isStockPair(current, candidate)) return true
++  return isForkCounterUpgrade(current, candidate)
++}
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+index a3c5f5d935..279f3ef04a 100644
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -1,4 +1,5 @@
+ import type { DesktopFileActions } from '@deepseek-ai/dsh-client-ui-file-actions/types'
++import type { DesktopFeedBridge } from '@deepseek-ai/dsh-client-ui-settings-general/types'
+ /** Typed preload operations exposed only by the Electron shell. */
+ 
+ import type { DesktopKeyboardApi, DesktopShortcutsApi } from '@deepseek-ai/dsh-client-shortcuts/protocol'
+@@ -35,6 +36,8 @@ export const DESKTOP_IPC = {
+   updatesStatus: 'dsh-desktop:updates-status',
+   updatesOpen: 'dsh-desktop:updates-open',
+   updatesPresentation: 'dsh-desktop:updates-presentation',
++  updatesFeedGet: 'dsh-desktop:updates-feed-get',
++  updatesFeedSet: 'dsh-desktop:updates-feed-set',
+   nativeThemeSet: 'dsh-desktop:native-theme-set',
+   windowFullscreen: 'dsh-desktop:window-fullscreen',
+   windowsAppearance: 'dsh-desktop:windows-appearance',
+@@ -91,6 +94,7 @@ export interface DshDesktopProductApi {
+    */
+   deviceInfo(): Promise<string>
+   readonly updates: {
++    readonly feed: DesktopFeedBridge
+     status(): Promise<DesktopUpdatePresentation>
+     open(): Promise<void>
+     subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index d8d0e30c4c..35ab6017ab 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -4,6 +4,9 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
+ 
+ import { access, readFile, writeFile } from 'node:fs/promises'
++import { readFileSync, writeFileSync } from 'node:fs'
++import { bakedUpdateDefaultFromManifest, checkPublisherCatalog, FORKHUB_PUBLISHER_FILE, getUpdateFeed, normalizeUpdateOwner } from './updateFeed.ts'
++import type { DesktopFeedState, DesktopFeedChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
+ import { join } from 'node:path'
+ import { fileURLToPath } from 'node:url'
+ import {
+@@ -677,6 +680,19 @@ async function main(): Promise<void> {
+ 
+   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
+   const updateChannel = desktopUpdateChannel(manifest)
++  const publisherFile = join(app.getPath('userData'), FORKHUB_PUBLISHER_FILE)
++  const feedReader = {
++    persistedOwner: (): string | null => {
++      try {
++        const raw = readFileSync(publisherFile, 'utf8')
++        return normalizeUpdateOwner((JSON.parse(raw) as { owner?: unknown }).owner ?? null)
++      } catch {
++        return null
++      }
++    },
++    envOwner: () => normalizeUpdateOwner(process.env.DSH_UPDATE_OWNER ?? null),
++    bakedDefault: () => bakedUpdateDefaultFromManifest(manifest),
++  }
+   const updates = new DesktopUpdateCoordinator(
+     publishUpdate,
+     async () => {
+@@ -735,6 +751,7 @@ async function main(): Promise<void> {
+     undefined, undefined, undefined,
+     (success, reason) => { void track('desktop_upgrade_download_result', { is_success: success, ...reason === undefined ? {} : { error_reason: reason } }) },
+     updateChannel,
++    feedReader,
+   )
+ 
+   const updateSchedule = new DesktopUpdateSchedule(updates, resolveDesktopUpdateScheduleConfig(process.env))
+@@ -871,6 +888,26 @@ async function main(): Promise<void> {
+     assertProductSender(event)
+     return presentDesktopUpdate(updates.state)
+   })
++  ipcMain.handle(DESKTOP_IPC.updatesFeedGet, () => {
++    const feed = getUpdateFeed(feedReader)
++    return { owner: feed.owner, repo: feed.repo } satisfies DesktopFeedState
++  })
++  ipcMain.handle(DESKTOP_IPC.updatesFeedSet, async (event, owner: unknown): Promise<DesktopFeedChangeResult> => {
++    assertProductSender(event)
++    const before = getUpdateFeed(feedReader)
++    const checked = await checkPublisherCatalog(typeof owner === 'string' ? owner : '')
++    if (!checked.ok) {
++      return { kind: 'failed', state: { owner: before.owner, repo: before.repo }, message: checked.message }
++    }
++    // Persist only on validation success; upstream has no .forkhub repo so
++    // it can never validate as a publisher. Nothing persists on failure.
++    writeFileSync(publisherFile, `${JSON.stringify({ owner: checked.owner })}\n`, { mode: 0o600 })
++    updates.applyForkHubFeed()
++    const after = getUpdateFeed(feedReader)
++    const state: DesktopFeedState = { owner: after.owner, repo: after.repo, releases: checked.releases }
++    void updates.check(true).catch((error: unknown) => { console.error('desktop update: feed check failed', error) })
++    return { kind: 'applied', state, releases: checked.releases, message: checked.message }
++  })
+   ipcMain.handle(DESKTOP_IPC.deviceInfo, (event) => {
+     assertProductSender(event)
+     return readDeviceInfo()
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+index 26266b4f1c..afef898b89 100644
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -4,6 +4,7 @@ import type { FileSaveResult } from '@deepseek-ai/dsh-client-ui-file-actions/typ
+ import type { DesktopShortcutInput, ShortcutConfigSnapshot, ShortcutSaveResult } from '@deepseek-ai/dsh-client-shortcuts/protocol'
+ import { contextBridge, ipcRenderer, webUtils } from 'electron'
+ import { DESKTOP_IPC, SCHEME, type DshDesktopProductApi, type DesktopUpdatePresentation } from './ipc.ts'
++import type { DesktopFeedState, DesktopFeedChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
+ import { PLATFORM_IPC } from './platform-ipc.ts'
+ import { markDocumentPlatform, syncWindowFullscreen } from './preload-platform.ts'
+ import { syncNativeTheme } from './preload-theme.ts'
+@@ -65,6 +66,10 @@ function createProductApi(): DshDesktopProductApi {
+       },
+     },
+     updates: {
++      feed: {
++        get: () => ipcRenderer.invoke(DESKTOP_IPC.updatesFeedGet) as Promise<DesktopFeedState>,
++        set: (owner: string) => ipcRenderer.invoke(DESKTOP_IPC.updatesFeedSet, owner) as Promise<DesktopFeedChangeResult>,
++      },
+       status: () => ipcRenderer.invoke(DESKTOP_IPC.updatesStatus) as Promise<DesktopUpdatePresentation>,
+       open: () => ipcRenderer.invoke(DESKTOP_IPC.updatesOpen) as Promise<void>,
+       subscribe(listener) {
+diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
+index 3b83cea08f..461019b506 100644
+--- a/apps/desktop/src/update-coordinator.ts
++++ b/apps/desktop/src/update-coordinator.ts
+@@ -7,6 +7,8 @@ import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo }
+ import { gt, valid } from 'semver'
+ import type { DesktopUpdateState } from './ipc.ts'
+ import { DesktopUpdateHttpExecutor } from './update-http-executor.ts'
++import { getUpdateFeed, type FeedReader } from './updateFeed.ts'
++import { isForkCounterUpgrade, parseForkVersion } from './forkVersion.ts'
+ import { DesktopUpdatePreparationError } from './update-error.ts'
+ 
+ const { autoUpdater } = electronUpdater
+@@ -56,6 +58,7 @@ export class DesktopUpdateCoordinator {
+     private readonly currentVersion: () => string = () => app.getVersion(),
+     private readonly downloadResult?: (success: boolean, reason?: string) => void,
+     private readonly channel: 'nightly' | 'latest' = 'nightly',
++    private readonly feedReader?: FeedReader,
+   ) {
+     if (updater === autoUpdater) {
+       // electron-updater omits this internal transport property from its public declarations.
+@@ -68,8 +71,11 @@ export class DesktopUpdateCoordinator {
+     }
+     this.updater.autoDownload = false
+     this.updater.autoInstallOnAppQuit = false
++    this.applyForkHubFeed()
+     this.updater.channel = channel
+-    this.updater.allowPrerelease = channel === 'nightly'
++    // Fork feed contains ONLY fork prereleases; always allow them here —
++    // the fork-counter gate in doCheck(), not the channel flag, decides.
++    this.updater.allowPrerelease = true
+     // Selecting a channel can enable downgrade in electron-updater.
+     this.updater.allowDowngrade = false
+     this.updater.on('download-progress', this.onProgress)
+@@ -80,6 +86,24 @@ export class DesktopUpdateCoordinator {
+   /** Latest observable state; complete download identity remains main-process-owned. */
+   get state(): DesktopUpdateState { return this.current }
+ 
++  /** Live ForkHub feed this coordinator polls (single source: getUpdateFeed). */
++  get feed(): { owner: string; repo: string } { return getUpdateFeed(this.feedReader) }
++
++  /**
++   * Repoint the live updater at the ForkHub catalog feed. Fork builds
++   * carry owner-stamped versions; the feed contains ONLY fork builds, so
++   * no stock prerelease can leak in and stock↔fork pairs stay refused by
++   * the version gate. Upstream has no `.forkhub` repo, so a stock build's
++   * feed can never serve a fork build.
++   */
++  applyForkHubFeed(): void {
++    const feed = getUpdateFeed(this.feedReader)
++    if (typeof this.updater.setFeedURL === 'function') {
++      this.updater.setFeedURL({ provider: 'github', owner: feed.owner, repo: feed.repo })
++    }
++    this.updater.allowPrerelease = true
++  }
++
+   /**
+    * Check metadata without downloading, joining any current check.
+    * @param manual - Whether a failed check must remain visible in the status indicator.
+@@ -189,8 +213,17 @@ export class DesktopUpdateCoordinator {
+       if (result === null) throw new Error('desktop update: no check result was returned')
+       const version = result.updateInfo.version
+       if (valid(version) === null) throw new Error('desktop update: feed version is invalid')
+-      if (this.channel === 'latest' && version.includes('-')) throw new Error('desktop update: latest feed contains a prerelease')
+-      this.candidate = result.isUpdateAvailable && gt(version, this.currentVersion()) ? version : undefined
++      if (this.channel === 'latest' && version.includes('-') && parseForkVersion(version) === null) {
++        throw new Error('desktop update: latest feed contains a prerelease')
++      }
++      // ForkHub rebuild gate: an owner-stamped fork build installs only
++      // over a same-owner, same-date, lower-counter build; stock<->fork
++      // and cross-owner pairs refuse. Stock pairs use semver.
++      const current = this.currentVersion()
++      const forkUpgrade = isForkCounterUpgrade(current, version)
++      const stockUpgrade = parseForkVersion(current) === null
++        && parseForkVersion(version) === null && gt(version, current)
++      this.candidate = result.isUpdateAvailable && (forkUpgrade || stockUpgrade) ? version : undefined
+       return this.setState(this.candidate === undefined ? { phase: 'idle' } : { phase: 'available', version })
+     } catch (error) {
+       return this.failure(error, 'check')
+diff --git a/apps/desktop/src/updateFeed.ts b/apps/desktop/src/updateFeed.ts
+new file mode 100644
+index 0000000000..d1520ef992
+--- /dev/null
++++ b/apps/desktop/src/updateFeed.ts
+@@ -0,0 +1,123 @@
++/** Single source of truth for the ForkHub update feed. Resolution order:
++ * persisted publisher override → DSH_UPDATE_OWNER env → baked
++ * extraMetadata default (stamped at package time) → hardcoded default.
++ * The with-fh build ships unstamped so its default is with-fh/.forkhub.
++ */
++
++export type ForkHubFeed = { owner: string; repo: string }
++
++export const FORKHUB_DEFAULT_OWNER = 'with-fh'
++export const FORKHUB_DEFAULT_REPO = '.forkhub'
++export const FORKHUB_PUBLISHER_FILE = 'forkhub-updater.json'
++
++const OWNER_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/
++
++/** Normalize a GitHub owner login (1–39 chars, alphanumerics + hyphens, no leading/trailing hyphen). */
++export function normalizeUpdateOwner(value: unknown): string | null {
++  if (typeof value !== 'string') return null
++  const owner = value.trim()
++  if (!OWNER_PATTERN.test(owner)) return null
++  return owner
++}
++
++type BakedConfig = {
++  extraMetadata?: { forkhubUpdateOwner?: unknown; forkhubUpdateRepo?: unknown }
++}
++
++/** Baked package-time default from electron-builder extraMetadata (unstamped in with-fh builds). */
++export function bakedUpdateDefault(processArgv: readonly string[] = []): ForkHubFeed | null {
++  void processArgv
++  try {
++    const pkg = (globalThis as { __forkhubBaked?: unknown }).__forkhubBaked as
++      | BakedConfig['extraMetadata']
++      | undefined
++    const owner = normalizeUpdateOwner(pkg?.forkhubUpdateOwner)
++    if (owner === null) return null
++    const repo = typeof pkg?.forkhubUpdateRepo === 'string' && pkg.forkhubUpdateRepo.trim() !== ''
++      ? pkg.forkhubUpdateRepo.trim()
++      : FORKHUB_DEFAULT_REPO
++    return { owner, repo }
++  } catch {
++    return null
++  }
++}
++
++/** Read the baked default from a packaged manifest object (package.json as shipped). */
++export function bakedUpdateDefaultFromManifest(manifest: unknown): ForkHubFeed | null {
++  if (typeof manifest !== 'object' || manifest === null) return null
++  const extra = (manifest as { build?: { extraMetadata?: unknown } }).build?.extraMetadata
++  if (typeof extra !== 'object' || extra === null) return null
++  const owner = normalizeUpdateOwner(
++    (extra as { forkhubUpdateOwner?: unknown }).forkhubUpdateOwner,
++  )
++  if (owner === null) return null
++  const repoRaw = (extra as { forkhubUpdateRepo?: unknown }).forkhubUpdateRepo
++  const repo = typeof repoRaw === 'string' && repoRaw.trim() !== '' ? repoRaw.trim() : FORKHUB_DEFAULT_REPO
++  return { owner, repo }
++}
++
++export type FeedReader = {
++  persistedOwner(): string | null
++  envOwner(): string | null
++  bakedDefault(): ForkHubFeed | null
++}
++
++/** Resolve the live update feed. Persisted override wins; default chain otherwise. */
++export function getUpdateFeed(reader?: Partial<FeedReader>): ForkHubFeed {
++  const persisted = reader?.persistedOwner?.() ?? null
++  if (persisted !== null) return { owner: persisted, repo: FORKHUB_DEFAULT_REPO }
++  const env = reader?.envOwner?.() ?? normalizeUpdateOwner(process.env.DSH_UPDATE_OWNER)
++  if (env !== null) return { owner: env, repo: FORKHUB_DEFAULT_REPO }
++  const baked = reader?.bakedDefault?.() ?? bakedUpdateDefault()
++  if (baked !== null) return baked
++  return { owner: FORKHUB_DEFAULT_OWNER, repo: FORKHUB_DEFAULT_REPO }
++}
++
++export type CatalogCheckResult =
++  | { ok: true; owner: string; repo: string; releases: number; message: string }
++  | { ok: false; owner: string; message: string }
++
++/**
++ * Validate a publisher catalog: the public {owner}/.forkhub repo must exist
++ * AND carry at least one published, non-draft release. Upstream has no
++ * .forkhub repo so it can never validate as a publisher. Unauthenticated —
++ * private catalogs are unsupported.
++ */
++export async function checkPublisherCatalog(
++  owner: string,
++  fetchImpl: typeof fetch = fetch,
++): Promise<CatalogCheckResult> {
++  const clean = normalizeUpdateOwner(owner)
++  if (clean === null) return { ok: false, owner, message: `invalid owner '${owner}'` }
++  let response: Response
++  try {
++    response = await fetchImpl(`https://api.github.com/repos/${clean}/.forkhub/releases?per_page=100`, {
++      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-desktop' },
++    })
++  } catch (error) {
++    return { ok: false, owner: clean, message: `catalog unreachable: ${error instanceof Error ? error.message : String(error)}` }
++  }
++  if (response.status === 404) {
++    return { ok: false, owner: clean, message: `${clean}/.forkhub does not exist (private catalogs unsupported)` }
++  }
++  if (!response.ok) {
++    return { ok: false, owner: clean, message: `catalog check failed (HTTP ${response.status})` }
++  }
++  let releases: Array<{ draft?: unknown; tag_name?: unknown }>
++  try {
++    releases = (await response.json()) as Array<{ draft?: unknown; tag_name?: unknown }>
++  } catch {
++    return { ok: false, owner: clean, message: 'catalog releases unreadable' }
++  }
++  const published = releases.filter(r => typeof r.tag_name === 'string' && r.draft !== true)
++  if (published.length === 0) {
++    return { ok: false, owner: clean, message: `${clean}/.forkhub has no published releases yet` }
++  }
++  return {
++    ok: true,
++    owner: clean,
++    repo: FORKHUB_DEFAULT_REPO,
++    releases: published.length,
++    message: `${clean}/.forkhub serves ${published.length} release(s)`,
++  }
++}
+diff --git a/apps/desktop/tests/forkhub-fork-version.spec.ts b/apps/desktop/tests/forkhub-fork-version.spec.ts
+new file mode 100644
+index 0000000000..2fb8c08928
+--- /dev/null
++++ b/apps/desktop/tests/forkhub-fork-version.spec.ts
+@@ -0,0 +1,33 @@
++import { describe, expect, it } from 'vitest'
++import { isForkCounterUpgrade, isStockPair, isVersionAllowedOnForkFeed, parseForkVersion } from '../src/forkVersion.ts'
++
++describe('forkhub rebuild identity', () => {
++  it('parses owner-stamped versions, yields null for stock', () => {
++    // Fork versions extend the product prerelease in DSH's native
++    // `<base>.<date>.<n>` form with the owner folded in:
++    // `0.2.2-rc.1.with-fh.20261110.1` — accepted by the build validator.
++    expect(parseForkVersion('0.2.2-rc.1.with-fh.20261110.1')).toEqual(
++      { base: '0.2.2-rc.1', owner: 'with-fh', date: '20261110', counter: 1 })
++    expect(parseForkVersion('0.2.2')).toBeNull()
++    expect(parseForkVersion('0.2.2-rc.1')).toBeNull()
++    expect(parseForkVersion('0.2.2-rc.1.20261110.1')).toBeNull()
++    expect(parseForkVersion('dsh-v0.2.2-rc.1')).toBeNull()
++  })
++
++  it('orders same-owner rebuilds by counter, refuses stock/fork and cross-owner pairs', () => {
++    expect(isForkCounterUpgrade('0.2.2-rc.1.with-fh.20261110.1', '0.2.2-rc.1.with-fh.20261110.2')).toBe(true)
++    expect(isForkCounterUpgrade('0.2.2-rc.1.with-fh.20261110.2', '0.2.2-rc.1.with-fh.20261110.1')).toBe(false)
++    expect(isForkCounterUpgrade('0.2.2-rc.1', '0.2.2-rc.1.with-fh.20261110.1')).toBe(false)
++    expect(isForkCounterUpgrade('0.2.2-rc.1.with-fh.20261110.1', '0.2.2-rc.1')).toBe(false)
++    expect(isForkCounterUpgrade('0.2.2-rc.1.with-fh.20261110.1', '0.2.2-rc.1.imbios.20261110.1')).toBe(false)
++    expect(isForkCounterUpgrade('0.2.2-rc.1.with-fh.20261110.1', '0.2.3-rc.1.with-fh.20261110.1')).toBe(false)
++  })
++
++  it('stock pairs stay governed by semver; fork feed accepts same-owner counter upgrades', () => {
++    expect(isStockPair('0.2.2-rc.1', '0.2.2-rc.2')).toBe(true)
++    expect(isStockPair('0.2.2-rc.1', '0.2.2-rc.1.with-fh.20261110.1')).toBe(false)
++    expect(isVersionAllowedOnForkFeed('0.2.2-rc.1', '0.2.2-rc.2')).toBe(true)
++    expect(isVersionAllowedOnForkFeed('0.2.2-rc.1.with-fh.20261110.1', '0.2.2-rc.1.with-fh.20261110.2')).toBe(true)
++    expect(isVersionAllowedOnForkFeed('0.2.2-rc.1', '0.2.2-rc.1.with-fh.20261110.1')).toBe(false)
++  })
++})
+diff --git a/apps/desktop/tests/forkhub-update-feed.spec.ts b/apps/desktop/tests/forkhub-update-feed.spec.ts
+new file mode 100644
+index 0000000000..2b6cb62e96
+--- /dev/null
++++ b/apps/desktop/tests/forkhub-update-feed.spec.ts
+@@ -0,0 +1,68 @@
++import { describe, expect, it, vi, afterEach } from 'vitest'
++import {
++  FORKHUB_DEFAULT_OWNER,
++  FORKHUB_DEFAULT_REPO,
++  bakedUpdateDefaultFromManifest,
++  checkPublisherCatalog,
++  getUpdateFeed,
++  normalizeUpdateOwner,
++} from '../src/updateFeed.ts'
++
++describe('forkhub update feed', () => {
++  it('normalizes owner logins, rejecting bad input', () => {
++    expect(normalizeUpdateOwner('with-fh')).toBe('with-fh')
++    expect(normalizeUpdateOwner('  ImBIOS  ')).toBe('ImBIOS')
++    expect(normalizeUpdateOwner('')).toBeNull()
++    expect(normalizeUpdateOwner('-lead')).toBeNull()
++    expect(normalizeUpdateOwner('trail-')).toBeNull()
++    expect(normalizeUpdateOwner('has space')).toBeNull()
++    expect(normalizeUpdateOwner('a'.repeat(40))).toBeNull()
++    expect(normalizeUpdateOwner(42)).toBeNull()
++  })
++
++  it('defaults to with-fh/.forkhub with no configuration', () => {
++    expect(getUpdateFeed({ persistedOwner: () => null, envOwner: () => null, bakedDefault: () => null }))
++      .toEqual({ owner: FORKHUB_DEFAULT_OWNER, repo: FORKHUB_DEFAULT_REPO })
++  })
++
++  it('orders persisted override above env above baked default', () => {
++    const baked = { owner: 'baked-owner', repo: '.forkhub' as const }
++    expect(getUpdateFeed({ persistedOwner: () => 'picked', envOwner: () => 'env-owner', bakedDefault: () => baked }).owner)
++      .toBe('picked')
++    expect(getUpdateFeed({ persistedOwner: () => null, envOwner: () => 'env-owner', bakedDefault: () => baked }).owner)
++      .toBe('env-owner')
++    expect(getUpdateFeed({ persistedOwner: () => null, envOwner: () => null, bakedDefault: () => baked }).owner)
++      .toBe('baked-owner')
++  })
++
++  it('reads the baked default from packaged manifest extraMetadata', () => {
++    expect(bakedUpdateDefaultFromManifest({ build: { extraMetadata: { forkhubUpdateOwner: 'ImBIOS' } } }))
++      .toEqual({ owner: 'ImBIOS', repo: '.forkhub' })
++    expect(bakedUpdateDefaultFromManifest({})).toBeNull()
++    expect(bakedUpdateDefaultFromManifest({ build: { extraMetadata: {} } })).toBeNull()
++  })
++})
++
++describe('forkhub publisher validation', () => {
++  afterEach(() => { vi.unstubAllGlobals() })
++
++  it('passes when the catalog repo has published releases', async () => {
++    const fetchImpl = vi.fn(async () => new Response(JSON.stringify([
++      { tag_name: 'v0.2.2-fh.with-fh.1', draft: false },
++      { tag_name: 'draft-tag', draft: true },
++    ]), { status: 200 })) as unknown as typeof fetch
++    const result = await checkPublisherCatalog('with-fh', fetchImpl)
++    expect(result).toEqual({ ok: true, owner: 'with-fh', repo: '.forkhub', releases: 1, message: 'with-fh/.forkhub serves 1 release(s)' })
++  })
++
++  it('fails distinctly for missing repo, empty catalog, and bad input', async () => {
++    const notFound = vi.fn(async () => new Response('{}', { status: 404 })) as unknown as typeof fetch
++    expect((await checkPublisherCatalog('nobody-there', notFound)).ok).toBe(false)
++    const empty = vi.fn(async () => new Response(JSON.stringify([{ tag_name: 'x', draft: true }]), { status: 200 })) as unknown as typeof fetch
++    const emptyResult = await checkPublisherCatalog('some-owner', empty)
++    expect(emptyResult.ok).toBe(false)
++    expect(emptyResult.message).toMatch(/no published releases/)
++    const bad = await checkPublisherCatalog('not an owner!')
++    expect(bad.ok).toBe(false)
++  })
++})
+diff --git a/apps/desktop/tests/update-coordinator.spec.ts b/apps/desktop/tests/update-coordinator.spec.ts
+index 3aef0bc60f..dc1c03fd5c 100644
+--- a/apps/desktop/tests/update-coordinator.spec.ts
++++ b/apps/desktop/tests/update-coordinator.spec.ts
+@@ -252,7 +252,10 @@ it('keeps a stable-version nightly installation on nightly and rejects prereleas
+   expect(nightly.updater.channel).toBe('nightly')
+   const latest = fixture('latest', '1.0.0')
+   expect(latest.updater.channel).toBe('latest')
+-  expect(latest.updater.allowPrerelease).toBe(false)
++  // ForkHub feed: prereleases stay allowed on every channel (the feed
++  // holds ONLY fork builds); the fork-counter gate in doCheck(), not the
++  // channel flag, refuses stock prereleases on latest.
++  expect(latest.updater.allowPrerelease).toBe(true)
+   expect(latest.updater.allowDowngrade).toBe(false)
+   expect((await latest.coordinator.check()).phase).toBe('error')
+   expect(latest.downloadUpdate).not.toHaveBeenCalled()
+diff --git a/apps/desktop/tsconfig.host.json b/apps/desktop/tsconfig.host.json
+index 7078ac8198..ab23acee02 100644
+--- a/apps/desktop/tsconfig.host.json
++++ b/apps/desktop/tsconfig.host.json
+@@ -29,6 +29,9 @@
+     {
+       "path": "../../packages/client/shortcuts/tsconfig.host.json"
+     },
++    {
++      "path": "../../packages/client/ui-settings-general/tsconfig.host.json"
++    },
+     {
+       "path": "../../packages/util/atomic-write"
+     },
+diff --git a/packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css b/packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css
+new file mode 100644
+index 0000000000..200a52495e
+--- /dev/null
++++ b/packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css
+@@ -0,0 +1,19 @@
++.row {
++  padding: 16px 0;
++  color: var(--dsw-alias-label-primary);
++  font-size: 14px;
++  line-height: 22px;
++  overflow-wrap: anywhere;
++}
++
++.rowText {
++  margin-bottom: 8px;
++}
++
++.title {
++  font-weight: 600;
++}
++
++.description {
++  opacity: 0.8;
++}
+diff --git a/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx b/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
+new file mode 100644
+index 0000000000..d29996bd3e
+--- /dev/null
++++ b/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
+@@ -0,0 +1,51 @@
++/** Settings → Version → ForkHub publisher row: validate a catalog owner, persist it, repoint the live feed. */
++import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
++import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
++import type { DesktopFeedSource } from './desktop-feed-source.ts'
++import css from './DesktopFeedRow.module.css'
++
++/** Framework-bound shell state and explicit Check action. */
++export interface DesktopFeedRowInjected {
++  hooks: { feed: DesktopFeedSource['store'] }
++  edit(input: string): void
++  check(): Promise<void>
++  dismiss(sequence: number): void
++}
++
++/**
++ * Render the ForkHub publisher input above the update check: typing an
++ * owner and pressing Check validates the catalog, persists the owner,
++ * repoints the live updater feed, and checks immediately. Nothing
++ * persists on failure; upstream has no `.forkhub` repo so it can never
++ * validate as a publisher.
++ */
++export function DesktopFeedRow({ useFeed, edit, check, dismiss, t }:
++  PropsRuntime<'settings.general.item'> & PropsLocale<'settings'> & InjectFace<DesktopFeedRowInjected>) {
++  const { state, failed, input, checking, notice } = useFeed(value => value)
++  const busy = checking
++  return <div className={css.row} role="group" aria-label={t('desktop.feed.title')}>
++    <div className={css.rowText}>
++      <div className={css.title}>{t('desktop.feed.title')}</div>
++      <div className={css.description}>{t('desktop.feed.description')}</div>
++      {(failed || state === undefined) && <div role="alert">{t('desktop.feed.unavailable')}</div>}
++      {notice !== undefined && <div role={notice.tone === 'error' ? 'alert' : 'status'}>
++        {notice.text}
++        <button type="button" onClick={() => { dismiss(notice.sequence) }} aria-label={t('desktop.feed.dismiss')}>
++          {t('desktop.feed.dismiss')}
++        </button>
++      </div>}
++    </div>
++    <div>
++      <input type="text" value={input} disabled={busy || state === undefined}
++        aria-label={t('desktop.feed.title')}
++        placeholder="with-fh"
++        onChange={(event) => { edit(event.currentTarget.value) }} />
++      <button type="button" disabled={busy || state === undefined || input.trim() === ''}
++        aria-busy={busy} aria-label={t('desktop.feed.check')}
++        onClick={() => { void check() }}>
++        {t('desktop.feed.check')}
++      </button>
++      {state !== undefined && <div>{t('desktop.feed.current', { owner: state.owner })}</div>}
++    </div>
++  </div>
++}
+diff --git a/packages/client/ui-settings-general/src/client/desktop-feed-source.ts b/packages/client/ui-settings-general/src/client/desktop-feed-source.ts
+new file mode 100644
+index 0000000000..045fa1ab53
+--- /dev/null
++++ b/packages/client/ui-settings-general/src/client/desktop-feed-source.ts
+@@ -0,0 +1,82 @@
++/** One shell-owned ForkHub publisher subscription for the Settings Version row. */
++import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
++import type { DesktopFeedBridge, DesktopFeedState } from '../types.ts'
++
++/** Shell state, typed owner input, and transient validation feedback. */
++export interface DesktopFeedSnapshot {
++  state?: DesktopFeedState
++  failed: boolean
++  input: string
++  checking: boolean
++  notice?: { sequence: number; tone: 'success' | 'error'; text: string }
++}
++
++/** Client observation; no catalog fetch happens here — the shell validates. */
++export class DesktopFeedSource {
++  /** Stable observation shared by the Version row. */
++  readonly store = createSnapshotStore<DesktopFeedSnapshot>({ failed: false, input: '', checking: false })
++  private live = true
++  private sequence = 0
++
++  /** @param bridge - Isolated shell API, present only in Desktop. */
++  constructor(private readonly bridge: DesktopFeedBridge) {
++    void bridge.get().then((state) => {
++      if (!this.live) return
++      this.store.set({ ...this.store.getSnapshot(), state, failed: false, input: state.owner })
++    }, () => {
++      if (!this.live) return
++      this.store.set({ ...this.store.getSnapshot(), failed: true })
++    })
++  }
++
++  /** Edit the owner input without validating yet. */
++  edit(input: string): void {
++    if (!this.live) return
++    this.store.set({ ...this.store.getSnapshot(), input })
++  }
++
++  /**
++   * Validate the typed owner: the shell checks the catalog, persists the
++   * owner on success, repoints the live updater feed, and checks
++   * immediately. Nothing persists on failure.
++   */
++  async check(): Promise<void> {
++    if (!this.live || this.store.getSnapshot().checking) return
++    const input = this.store.getSnapshot().input.trim()
++    if (input === '') return
++    this.store.set({ ...this.store.getSnapshot(), checking: true })
++    let message: string | undefined
++    let releases = 0
++    let applied = false
++    try {
++      const result = await this.bridge.set(input)
++      applied = result.kind === 'applied'
++      message = result.message
++      releases = result.kind === 'applied' ? result.releases : 0
++      if (this.live) {
++        this.store.set({ ...this.store.getSnapshot(), state: result.state, failed: false,
++          notice: { sequence: ++this.sequence, tone: applied ? 'success' as const : 'error' as const, text: message } })
++      }
++    } catch {
++      if (this.live) {
++        this.store.set({ ...this.store.getSnapshot(), failed: true,
++          notice: { sequence: ++this.sequence, tone: 'error' as const, text: 'Catalog check failed' } })
++      }
++    } finally {
++      if (this.live) this.store.set({ ...this.store.getSnapshot(), checking: false })
++    }
++    void releases
++    void applied
++  }
++
++  /** Retire only the toast whose animation completed. */
++  dismissNotice(sequence: number): void {
++    const current = this.store.getSnapshot()
++    if (current.notice?.sequence !== sequence) return
++    const { notice: _notice, ...next } = current
++    this.store.set(next)
++  }
++
++  /** Detach and ignore late IPC responses. */
++  dispose(): void { this.live = false }
++}
+diff --git a/packages/client/ui-settings-general/src/client/index.ts b/packages/client/ui-settings-general/src/client/index.ts
+index 0e6fae5e58..5c9151ef07 100644
+--- a/packages/client/ui-settings-general/src/client/index.ts
++++ b/packages/client/ui-settings-general/src/client/index.ts
+@@ -34,7 +34,9 @@ import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client
+ import { createSettingsShellStore } from './shell-store.ts'
+ import { SettingsRoot } from './SettingsRoot.tsx'
+ import { DesktopUpdateBadge } from './DesktopUpdateIndicator.tsx'
+-import type { DesktopUpdateBridge } from '../types.ts'
++import type { DesktopUpdateBridge, DesktopFeedBridge } from '../types.ts'
++import { DesktopFeedSource } from './desktop-feed-source.ts'
++import { DesktopFeedRow } from './DesktopFeedRow.tsx'
+ import { DesktopUpdateSource } from './desktop-update-source.ts'
+ import { CloseLabel, HeaderContent, TriggerContent } from './chrome.tsx'
+ import { GeneralSection } from './GeneralSection.tsx'
+@@ -102,6 +104,19 @@ export function apply(ctx: ClientContext): void {
+   ctx.effect(() => ctx.locale.register(NS, { zh, en, ja, es, fr, de, ru, pt }), 'ui-settings-general: dictionaries')
+   const connection = ctx.get('connection') as ConnectionHandle
+   const carrier = (globalThis as typeof globalThis & { dshDesktop?: { protocolVersion: number; updates?: DesktopUpdateBridge } }).dshDesktop
++  const carrierUpdates = carrier?.protocolVersion === 1 ? carrier.updates : undefined
++  const feedBridge: DesktopFeedBridge | undefined = carrierUpdates !== undefined && 'feed' in carrierUpdates
++    ? (carrierUpdates as { feed?: DesktopFeedBridge }).feed
++    : undefined
++  if (feedBridge !== undefined) {
++    const feed = new DesktopFeedSource(feedBridge)
++    ctx.slots.inject('settings.general.item', () => ctx.slots.register({
++      name: 'settings.general.item', id: 'desktop-update-feed', order: 94, locale: NS,
++      inject: () => ({ hooks: { feed: feed.store },
++        edit: (input: string) => { feed.edit(input) }, check: () => feed.check(),
++        dismiss: (sequence: number) => { feed.dismissNotice(sequence) } }),
++    }, DesktopFeedRow))
++  }
+   const desktopUpdate = new DesktopUpdateSource(carrier?.protocolVersion === 1 ? carrier.updates : undefined)
+   ctx.effect(() => () => { desktopUpdate.dispose() }, 'ui-settings-general: desktop update carrier')
+   ctx.slots.inject('sidebar.toggle.badge', () => ctx.slots.register({
+diff --git a/packages/client/ui-settings-general/src/client/locales.ts b/packages/client/ui-settings-general/src/client/locales.ts
+index 58afc6bba7..64142f5186 100644
+--- a/packages/client/ui-settings-general/src/client/locales.ts
++++ b/packages/client/ui-settings-general/src/client/locales.ts
+@@ -44,6 +44,12 @@ export const zh = {
+   'hostRelease.unknown': '未解析',
+   'hostRelease.reload': '刷新以加载新版本',
+   'hostRelease.later': '暂不刷新',
++  'desktop.feed.title': 'ForkHub 发布者',
++  'desktop.feed.description': '输入发布更新的 GitHub 用户名或组织点击检查后验证其目录并切换更新源。',
++  'desktop.feed.check': '检查',
++  'desktop.feed.current': '当前更新源：{owner}/.forkhub',
++  'desktop.feed.unavailable': '无法读取更新源请重启应用。',
++  'desktop.feed.dismiss': '关闭',
+ } satisfies Record<string, string>
+ 
+ /** The settings namespace key union. */
+@@ -93,6 +99,12 @@ export const en = {
+   'hostRelease.unknown': 'Unknown',
+   'hostRelease.reload': 'Reload to load the new version',
+   'hostRelease.later': 'Not now',
++  'desktop.feed.title': 'ForkHub publisher',
++  'desktop.feed.description': 'Type the GitHub user or org whose catalog the app updates from. Check validates the catalog, then switches the feed.',
++  'desktop.feed.check': 'Check',
++  'desktop.feed.current': 'Current feed: {owner}/.forkhub',
++  'desktop.feed.unavailable': 'Could not read the update feed. Restart the app.',
++  'desktop.feed.dismiss': 'Dismiss',
+ } satisfies Record<SettingsKey, string>
+ 
+ /** Japanese copy, checked against the English keys. */
+@@ -139,6 +151,12 @@ export const ja = {
+   'hostRelease.unknown': '不明',
+   'hostRelease.reload': '再読み込みして新しいバージョンを読み込む',
+   'hostRelease.later': '後で',
++  'desktop.feed.title': 'ForkHub パブリッシャー',
++  'desktop.feed.description': '更新元の GitHub ユーザーまたは組織を入力します。チェックでカタログを検証してフィードを切り替えます。',
++  'desktop.feed.check': 'チェック',
++  'desktop.feed.current': '現在のフィード: {owner}/.forkhub',
++  'desktop.feed.unavailable': '更新フィードを読み取れません。アプリを再起動してください。',
++  'desktop.feed.dismiss': '閉じる',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** Spanish dictionary, checked against the English keys. */
+@@ -185,6 +203,12 @@ export const es = {
+   'hostRelease.unknown': 'Desconocido',
+   'hostRelease.reload': 'Recargar para cargar la nueva versión.',
+   'hostRelease.later': 'Ahora no',
++  'desktop.feed.title': 'Editor de ForkHub',
++  'desktop.feed.description': 'Escribe el usuario u organización de GitHub cuyo catálogo sigue la app. Comprobar valida el catálogo y cambia el feed.',
++  'desktop.feed.check': 'Comprobar',
++  'desktop.feed.current': 'Feed actual: {owner}/.forkhub',
++  'desktop.feed.unavailable': 'No se pudo leer el feed de actualizaciones. Reinicia la app.',
++  'desktop.feed.dismiss': 'Descartar',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** French dictionary, checked against the English keys. */
+@@ -231,6 +255,12 @@ export const fr = {
+   'hostRelease.unknown': 'Inconnu',
+   'hostRelease.reload': 'Recharger pour charger la nouvelle version',
+   'hostRelease.later': 'Pas maintenant',
++  'desktop.feed.title': 'Éditeur ForkHub',
++  'desktop.feed.description': 'Saisissez l’utilisateur ou l’organisation GitHub dont la app suit le catalogue. Vérifier valide le catalogue puis change le flux.',
++  'desktop.feed.check': 'Vérifier',
++  'desktop.feed.current': 'Flux actuel : {owner}/.forkhub',
++  'desktop.feed.unavailable': 'Impossible de lire le flux de mise à jour. Redémarrez l’app.',
++  'desktop.feed.dismiss': 'Ignorer',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** German dictionary, checked against the English keys. */
+@@ -277,6 +307,12 @@ export const de = {
+   'hostRelease.unknown': 'Unbekannt',
+   'hostRelease.reload': 'Neu laden, um die neue Version zu laden',
+   'hostRelease.later': 'Nicht jetzt',
++  'desktop.feed.title': 'ForkHub-Herausgeber',
++  'desktop.feed.description': 'Gib den GitHub-Benutzer oder die Organisation ein, deren Katalog die App verfolgt. Prüfen validiert den Katalog und wechselt den Feed.',
++  'desktop.feed.check': 'Prüfen',
++  'desktop.feed.current': 'Aktueller Feed: {owner}/.forkhub',
++  'desktop.feed.unavailable': 'Update-Feed konnte nicht gelesen werden. Starte die App neu.',
++  'desktop.feed.dismiss': 'Schließen',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** Russian dictionary, checked against the English keys. */
+@@ -323,6 +359,12 @@ export const ru = {
+   'hostRelease.unknown': 'Неизвестно',
+   'hostRelease.reload': 'Перезагрузите, чтобы загрузить новую версию',
+   'hostRelease.later': 'Не сейчас',
++  'desktop.feed.title': 'Издатель ForkHub',
++  'desktop.feed.description': 'Введите пользователя или организацию GitHub, чей каталог отслеживает приложение. Проверка валидирует каталог и переключает ленту.',
++  'desktop.feed.check': 'Проверить',
++  'desktop.feed.current': 'Текущая лента: {owner}/.forkhub',
++  'desktop.feed.unavailable': 'Не удалось прочитать ленту обновлений. Перезапустите приложение.',
++  'desktop.feed.dismiss': 'Закрыть',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** Portuguese dictionary, checked against the English keys. */
+@@ -369,4 +411,10 @@ export const pt = {
+   'hostRelease.unknown': 'Desconhecido',
+   'hostRelease.reload': 'Recarregue para carregar a nova versão',
+   'hostRelease.later': 'Agora não',
++  'desktop.feed.title': 'Editor do ForkHub',
++  'desktop.feed.description': 'Digite o usuário ou organização do GitHub cujo catálogo o app acompanha. Verificar valida o catálogo e troca o feed.',
++  'desktop.feed.check': 'Verificar',
++  'desktop.feed.current': 'Feed atual: {owner}/.forkhub',
++  'desktop.feed.unavailable': 'Não foi possível ler o feed de atualização. Reinicie o app.',
++  'desktop.feed.dismiss': 'Dispensar',
+ } satisfies Record<keyof typeof en, string>
+diff --git a/packages/client/ui-settings-general/src/types.ts b/packages/client/ui-settings-general/src/types.ts
+index 9aa0ea95e3..e4a04ebf1c 100644
+--- a/packages/client/ui-settings-general/src/types.ts
++++ b/packages/client/ui-settings-general/src/types.ts
+@@ -28,6 +28,34 @@ export interface DesktopUpdateBridge {
+   subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
+ }
+ 
++/** ForkHub publisher feed exposed through the isolated preload. */
++export interface DesktopFeedState {
++  readonly owner: string
++  readonly repo: string
++  readonly releases?: number
++}
++
++/** Outcome of one publisher Check; failures persist nothing. */
++export type DesktopFeedChangeResult =
++  | { readonly kind: 'applied'; readonly state: DesktopFeedState; readonly releases: number; readonly message: string }
++  | { readonly kind: 'failed'; readonly state: DesktopFeedState; readonly message: string }
++
++/** Shell-owned publisher catalog behind the Settings → Version row. */
++export interface DesktopFeedBridge {
++  /** @returns Current feed owner; resolved from the same single source as the updater. */
++  get(): Promise<DesktopFeedState>
++  /**
++   * @param owner - Publisher to validate (public {owner}/.forkhub with ≥1 published release).
++   * @returns Validation success persists the owner, repoints the live feed, and checks immediately.
++   */
++  set(owner: string): Promise<DesktopFeedChangeResult>
++}
++
++/** Optional carrier API; it cannot select artifacts or authorize installation. */
++export interface DesktopUpdateBridgeWithFeed extends DesktopUpdateBridge {
++  readonly feed: DesktopFeedBridge
++}
++
+ /** Shared carrier status for the account row and collapsed sidebar badge. */
+ export interface DesktopUpdateView {
+   readonly presentation?: DesktopUpdatePresentation
+diff --git a/packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts b/packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts
+new file mode 100644
+index 0000000000..b6b87acf05
+--- /dev/null
++++ b/packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts
+@@ -0,0 +1,64 @@
++import { expect, it, vi } from 'vitest'
++import { DesktopFeedSource } from '../src/client/desktop-feed-source.ts'
++import type { DesktopFeedChangeResult, DesktopFeedState } from '../src/types.ts'
++
++const withFh: DesktopFeedState = { owner: 'with-fh', repo: '.forkhub' }
++
++function fixture() {
++  const get = Promise.withResolvers<DesktopFeedState>()
++  const set = Promise.withResolvers<DesktopFeedChangeResult>()
++  const apply = vi.fn(() => set.promise)
++  const source = new DesktopFeedSource({ get: () => get.promise, set: apply })
++  return { source, get, set, apply }
++}
++
++it('seeds the input from the shell feed and applies a validated owner', async () => {
++  const f = fixture()
++  f.get.resolve(withFh)
++  await f.get.promise
++  expect(f.source.store.getSnapshot().input).toBe('with-fh')
++  f.source.edit('ImBIOS')
++  const pending = f.source.check()
++  expect(f.source.store.getSnapshot().checking).toBe(true)
++  const applied: DesktopFeedState = { owner: 'ImBIOS', repo: '.forkhub', releases: 3 }
++  f.set.resolve({ kind: 'applied', state: applied, releases: 3, message: 'ImBIOS/.forkhub serves 3 release(s)' })
++  await pending
++  const snapshot = f.source.store.getSnapshot()
++  expect(snapshot.state).toEqual(applied)
++  expect(snapshot.checking).toBe(false)
++  expect(snapshot.notice?.tone).toBe('success')
++  f.source.dispose()
++})
++
++it('surfaces validation failure without changing the feed', async () => {
++  const f = fixture()
++  f.get.resolve(withFh)
++  await f.get.promise
++  f.source.edit('nobody-there')
++  const pending = f.source.check()
++  const failed: DesktopFeedState = { owner: 'with-fh', repo: '.forkhub' }
++  f.set.resolve({ kind: 'failed', state: failed, message: 'nobody-there/.forkhub does not exist (private catalogs unsupported)' })
++  await pending
++  const snapshot = f.source.store.getSnapshot()
++  expect(snapshot.state).toEqual(failed)
++  expect(snapshot.notice?.tone).toBe('error')
++  expect(snapshot.notice?.text).toMatch(/does not exist/)
++  f.source.dispose()
++})
++
++it('ignores empty input and dismisses notices by sequence', async () => {
++  const f = fixture()
++  f.get.resolve(withFh)
++  await f.get.promise
++  f.source.edit('   ')
++  await f.source.check()
++  expect(f.apply).not.toHaveBeenCalled()
++  f.source.edit('with-fh')
++  const pending = f.source.check()
++  f.set.resolve({ kind: 'applied', state: withFh, releases: 1, message: 'ok' })
++  await pending
++  expect(f.source.store.getSnapshot().notice?.sequence).toBe(1)
++  f.source.dismissNotice(1)
++  expect(f.source.store.getSnapshot().notice).toBeUndefined()
++  f.source.dispose()
++})

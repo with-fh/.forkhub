@@ -15,13 +15,43 @@
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "dsh/forkhub-support",
       "last_realized_against_commit": null,
-      "note": "PLACEHOLDER \u2014 real INTENT lands via fh draft against dsh-v0.2.2-rc.1; captures the required shape (274k stars >= 2k gate)"
+      "note": "PLACEHOLDER — real INTENT lands via fh draft against dsh-v0.2.2-rc.1; captures the required shape (274k stars >= 2k gate)"
+    },
+    "dsh-forkhub-support-0qjj6stm": {
+      "status": "applied",
+      "version": "1.0.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "dsh/forkhub-support",
+      "last_realized_against_commit": "66491b05e3",
+      "note": "Realized against upstream master fcc0ad4 (merge of dsh-v0.2.2-rc.1); 277k stars >= 2k gate",
+      "target_area": [
+        "apps/desktop/scripts/desktop-package-environment.mjs",
+        "apps/desktop/scripts/electron-builder-config.mjs",
+        "apps/desktop/src/forkVersion.ts",
+        "apps/desktop/src/ipc.ts",
+        "apps/desktop/src/main.ts",
+        "apps/desktop/src/preload-app.ts",
+        "apps/desktop/src/update-coordinator.ts",
+        "apps/desktop/src/updateFeed.ts",
+        "apps/desktop/tests/forkhub-fork-version.spec.ts",
+        "apps/desktop/tests/forkhub-update-feed.spec.ts",
+        "apps/desktop/tests/update-coordinator.spec.ts",
+        "apps/desktop/tsconfig.host.json",
+        "packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css",
+        "packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx",
+        "packages/client/ui-settings-general/src/client/desktop-feed-source.ts",
+        "packages/client/ui-settings-general/src/client/index.ts",
+        "packages/client/ui-settings-general/src/client/locales.ts",
+        "packages/client/ui-settings-general/src/types.ts",
+        "packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts"
+      ]
     }
   },
   "apply_order": [
-    "dsh-forkhub-support-placeholder"
+    "dsh-forkhub-support-0qjj6stm"
   ],
   "slug_aliases": {
-    "dsh-forkhub-support": "dsh-forkhub-support-placeholder"
+    "dsh-forkhub-support": "dsh-forkhub-support-0qjj6stm"
   }
 }
