@@ -447,6 +447,12 @@ jobs:
           # are safe to keep here.
           NATIVELY_GOOGLE_CLIENT_ID: ${{ secrets.NATIVELY_GOOGLE_CLIENT_ID }}
           NATIVELY_GOOGLE_CLIENT_SECRET: ${{ secrets.NATIVELY_GOOGLE_CLIENT_SECRET }}
+          # OpenDia resign pipeline: AMO JWT for `web-ext sign
+          # --channel=unlisted` (repo Settings → Secrets; absent = build.sh
+          # soft-fails with a patched-source bundle). Same sanctioned
+          # per-target forwarding pattern as above.
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
           # Target slug for per-target bundle numbering (see build.sh).
           FORKHUB_TARGET: ${{ matrix.pair.target }}
           # OS leg identity for multi-OS targets (see build.sh numbering
