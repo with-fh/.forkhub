@@ -1,18 +1,54 @@
+From 49e77060624f5462c048328bb59fc4e50abbff71 Mon Sep 17 00:00:00 2001
+From: Imamuzzaki Abu Salam <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 13:47:29 +0700
+Subject: [PATCH] channel-only: ForkHub with-fh update-channel intent
+ (updateFeed, forkVersion, coordinator feed, publisher UI)
+
+---
+ .../scripts/desktop-package-environment.mjs   |   7 +-
+ .../scripts/electron-builder-config.mjs       |  15 ++-
+ apps/desktop/src/forkVersion.ts               |  60 +++++++++
+ apps/desktop/src/ipc.ts                       |   4 +
+ apps/desktop/src/main.ts                      |  38 ++++++
+ apps/desktop/src/preload-app.ts               |   5 +
+ apps/desktop/src/update-coordinator.ts        |  32 ++++-
+ apps/desktop/src/updateFeed.ts                | 123 ++++++++++++++++++
+ .../tests/forkhub-fork-version.spec.ts        |  33 +++++
+ .../desktop/tests/forkhub-update-feed.spec.ts |  68 ++++++++++
+ apps/desktop/tests/update-coordinator.spec.ts |   3 +
+ apps/desktop/tsconfig.host.json               |   3 +
+ .../src/client/DesktopFeedRow.module.css      |  19 +++
+ .../src/client/DesktopFeedRow.tsx             |  51 ++++++++
+ .../src/client/desktop-feed-source.ts         |  82 ++++++++++++
+ .../ui-settings-general/src/client/index.ts   |  17 ++-
+ .../ui-settings-general/src/client/locales.ts |  48 +++++++
+ .../client/ui-settings-general/src/types.ts   |  28 ++++
+ .../tests/desktop-feed.client.spec.ts         |  64 +++++++++
+ 19 files changed, 694 insertions(+), 6 deletions(-)
+ create mode 100644 apps/desktop/src/forkVersion.ts
+ create mode 100644 apps/desktop/src/updateFeed.ts
+ create mode 100644 apps/desktop/tests/forkhub-fork-version.spec.ts
+ create mode 100644 apps/desktop/tests/forkhub-update-feed.spec.ts
+ create mode 100644 packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css
+ create mode 100644 packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
+ create mode 100644 packages/client/ui-settings-general/src/client/desktop-feed-source.ts
+ create mode 100644 packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts
+
 diff --git a/apps/desktop/scripts/desktop-package-environment.mjs b/apps/desktop/scripts/desktop-package-environment.mjs
-index 27a7f92c7f..48dcd1043b 100644
+index 83e9dbbc..3d3a97ef 100644
 --- a/apps/desktop/scripts/desktop-package-environment.mjs
 +++ b/apps/desktop/scripts/desktop-package-environment.mjs
-@@ -19,6 +19,9 @@ const SHARED_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|NPM_REGISTRY|M
- const WINDOWS_SETTING = /^DSH_DESKTOP_WINDOWS_(?:CER_FILE|SIGNTOOL|KEY_CONTAINER|TOKEN_PIN|SIGNATURE_CACHE_DIR|SIGNATURE_CACHE_CONCURRENCY|PACK_CONCURRENCY|COMPRESSION_LEVEL)$/u
+@@ -20,6 +20,9 @@ const WINDOWS_SETTING = /^DSH_DESKTOP_WINDOWS_(?:CER_FILE|SIGNTOOL|KEY_CONTAINER
  const MACOS_SETTING = /^(?:DSH_DESKTOP_MACOS_(?:SIGNING_IDENTITY|TEAM_ID|SIGNATURE_CACHE_DIR|PACK_CONCURRENCY|ZIP_COMPRESSION_LEVEL|DOWNLOAD_PROXY|NOTARIZATION_PROXY)|APPLE_(?:API_KEY|API_KEY_ID|API_ISSUER|ID|APP_SPECIFIC_PASSWORD|TEAM_ID|KEYCHAIN|KEYCHAIN_PROFILE)|CSC_(?:LINK|KEY_PASSWORD))$/u
  const AMBIENT_RELEASE_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|MANDATORY_UPDATE_.*|WINDOWS_.*|MACOS_.*)|APPLE_.*|(?:WIN_)?CSC_.*|DOWNLOAD_(?:TEST|PROD)_.*)$/iu
-+
+ 
 +/** Owner stamp for ForkHub catalog builds; never a release secret, always survives the ambient strip. */
 +const AMBIENT_KEEP_SETTING = /^DSH_UPDATE_OWNER$/u
- const FILE_SETTINGS = ['DSH_DESKTOP_WINDOWS_CER_FILE', 'DSH_DESKTOP_WINDOWS_SIGNTOOL', 'APPLE_API_KEY', 'APPLE_KEYCHAIN', 'CSC_LINK']
- 
++
  /**
-@@ -28,7 +31,7 @@ const FILE_SETTINGS = ['DSH_DESKTOP_WINDOWS_CER_FILE', 'DSH_DESKTOP_WINDOWS_SIGN
+  * Select local macOS test defaults without reading dotenv files or inheriting release settings.
+  * @param {NodeJS.ProcessEnv} environment Parent environment, retained for build tools and networking.
+@@ -27,7 +30,7 @@ const AMBIENT_RELEASE_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|MANDA
   */
  export function localMacOSPackageEnvironment(environment = process.env) {
    return {
@@ -21,7 +57,7 @@ index 27a7f92c7f..48dcd1043b 100644
      DSH_DESKTOP_APP_ID: 'com.deepseek.harness',
      DSH_DESKTOP_UNSIGNED: '1',
    }
-@@ -94,7 +97,7 @@ export function loadDesktopPackageEnvironment(platform, environment = process.en
+@@ -93,7 +96,7 @@ export function loadDesktopPackageEnvironment(platform, environment = process.en
      settings.DOWNLOAD_TEST_RELEASE_ID = releaseId
    }
    return {
@@ -31,10 +67,10 @@ index 27a7f92c7f..48dcd1043b 100644
      ...(environment.DSH_DESKTOP_UPDATE_CHANNEL === undefined ? {} : { DSH_DESKTOP_UPDATE_CHANNEL: environment.DSH_DESKTOP_UPDATE_CHANNEL }),
      ...(preset === undefined ? {} : { DSH_PACKAGING_PRESET: preset }),
 diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
-index cf0c19e895..c57d8ebc58 100644
+index d5522e3d..f2b76cbf 100644
 --- a/apps/desktop/scripts/electron-builder-config.mjs
 +++ b/apps/desktop/scripts/electron-builder-config.mjs
-@@ -96,7 +96,13 @@ export function createElectronBuilderConfig(
+@@ -99,7 +99,13 @@ export function createElectronBuilderConfig(
    if (windowsSigner !== undefined) {
      installWindowsNsisBootstrapSigner({ sign: windowsSigner })
    }
@@ -49,7 +85,7 @@ index cf0c19e895..c57d8ebc58 100644
    if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
    // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
    // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
-@@ -110,6 +116,9 @@ export function createElectronBuilderConfig(
+@@ -112,6 +118,9 @@ export function createElectronBuilderConfig(
      extraMetadata: {
        dshDesktopAppId: appId,
        dshDesktopUpdateChannel: update?.channel ?? 'nightly',
@@ -59,7 +95,7 @@ index cf0c19e895..c57d8ebc58 100644
        ...(policy === undefined ? {} : { dshMandatoryUpdatePolicy: policy }),
        ...buildVersion === productVersion ? {} : { version: buildVersion },
        ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
-@@ -269,6 +278,8 @@ export function createElectronBuilderConfig(
+@@ -271,6 +280,8 @@ export function createElectronBuilderConfig(
        differentialPackage: true,
      },
      detectUpdateChannel: false,
@@ -71,7 +107,7 @@ index cf0c19e895..c57d8ebc58 100644
  }
 diff --git a/apps/desktop/src/forkVersion.ts b/apps/desktop/src/forkVersion.ts
 new file mode 100644
-index 0000000000..0ee034b9fa
+index 00000000..0ee034b9
 --- /dev/null
 +++ b/apps/desktop/src/forkVersion.ts
 @@ -0,0 +1,60 @@
@@ -136,7 +172,7 @@ index 0000000000..0ee034b9fa
 +  return isForkCounterUpgrade(current, candidate)
 +}
 diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
-index a3c5f5d935..279f3ef04a 100644
+index 83ebe741..f0034b46 100644
 --- a/apps/desktop/src/ipc.ts
 +++ b/apps/desktop/src/ipc.ts
 @@ -1,4 +1,5 @@
@@ -144,8 +180,8 @@ index a3c5f5d935..279f3ef04a 100644
 +import type { DesktopFeedBridge } from '@deepseek-ai/dsh-client-ui-settings-general/types'
  /** Typed preload operations exposed only by the Electron shell. */
  
- import type { DesktopKeyboardApi, DesktopShortcutsApi } from '@deepseek-ai/dsh-client-shortcuts/protocol'
-@@ -35,6 +36,8 @@ export const DESKTOP_IPC = {
+ export type { DesktopChannelState, DesktopChannelChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
+@@ -40,6 +41,8 @@ export const DESKTOP_IPC = {
    updatesStatus: 'dsh-desktop:updates-status',
    updatesOpen: 'dsh-desktop:updates-open',
    updatesPresentation: 'dsh-desktop:updates-presentation',
@@ -154,32 +190,32 @@ index a3c5f5d935..279f3ef04a 100644
    nativeThemeSet: 'dsh-desktop:native-theme-set',
    windowFullscreen: 'dsh-desktop:window-fullscreen',
    windowsAppearance: 'dsh-desktop:windows-appearance',
-@@ -91,6 +94,7 @@ export interface DshDesktopProductApi {
-    */
+@@ -104,6 +107,7 @@ export interface DshDesktopProductApi {
    deviceInfo(): Promise<string>
    readonly updates: {
+     readonly channels: DesktopChannelBridge
 +    readonly feed: DesktopFeedBridge
      status(): Promise<DesktopUpdatePresentation>
      open(): Promise<void>
      subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index d8d0e30c4c..35ab6017ab 100644
+index 8f9cd823..4030a86d 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -4,6 +4,9 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
- /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
- 
+@@ -10,6 +10,9 @@ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
  import { access, readFile, writeFile } from 'node:fs/promises'
+ import { join } from 'node:path'
+ import { fileURLToPath } from 'node:url'
 +import { readFileSync, writeFileSync } from 'node:fs'
 +import { bakedUpdateDefaultFromManifest, checkPublisherCatalog, FORKHUB_PUBLISHER_FILE, getUpdateFeed, normalizeUpdateOwner } from './updateFeed.ts'
 +import type { DesktopFeedState, DesktopFeedChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
- import { join } from 'node:path'
- import { fileURLToPath } from 'node:url'
  import {
-@@ -677,6 +680,19 @@ async function main(): Promise<void> {
- 
-   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
-   const updateChannel = desktopUpdateChannel(manifest)
+   app,
+   BrowserWindow,
+@@ -702,6 +705,19 @@ async function main(): Promise<void> {
+     packagedChannel, changing: false,
+     ...(initialChannel.kind === 'error' ? { error: configurationFailure(initialChannel.error) } : {}) }
+   const updateChannel = initialChannel.kind === 'ready' ? initialChannel.channel : packagedChannel
 +  const publisherFile = join(app.getPath('userData'), FORKHUB_PUBLISHER_FILE)
 +  const feedReader = {
 +    persistedOwner: (): string | null => {
@@ -196,17 +232,18 @@ index d8d0e30c4c..35ab6017ab 100644
    const updates = new DesktopUpdateCoordinator(
      publishUpdate,
      async () => {
-@@ -735,6 +751,7 @@ async function main(): Promise<void> {
+@@ -760,6 +776,8 @@ async function main(): Promise<void> {
      undefined, undefined, undefined,
      (success, reason) => { void track('desktop_upgrade_download_result', { is_success: success, ...reason === undefined ? {} : { error_reason: reason } }) },
      updateChannel,
++    undefined,
 +    feedReader,
    )
  
-   const updateSchedule = new DesktopUpdateSchedule(updates, resolveDesktopUpdateScheduleConfig(process.env))
-@@ -871,6 +888,26 @@ async function main(): Promise<void> {
+   if (initialChannel.kind === 'error') updates.suspendConfiguration(initialChannel.error.path)
+@@ -939,6 +957,26 @@ async function main(): Promise<void> {
      assertProductSender(event)
-     return presentDesktopUpdate(updates.state)
+     return updatePresentation(updates.state)
    })
 +  ipcMain.handle(DESKTOP_IPC.updatesFeedGet, () => {
 +    const feed = getUpdateFeed(feedReader)
@@ -232,18 +269,18 @@ index d8d0e30c4c..35ab6017ab 100644
      assertProductSender(event)
      return readDeviceInfo()
 diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
-index 26266b4f1c..afef898b89 100644
+index 6b4e9896..5aaf8d75 100644
 --- a/apps/desktop/src/preload-app.ts
 +++ b/apps/desktop/src/preload-app.ts
-@@ -4,6 +4,7 @@ import type { FileSaveResult } from '@deepseek-ai/dsh-client-ui-file-actions/typ
+@@ -2,6 +2,7 @@ import type { FileSaveResult } from '@deepseek-ai/dsh-client-ui-file-actions/typ
+ /** Origin-scoped boot, native directory selection, host paths of picked files, and update presentation with native confirmation actions. */
+ 
+ import type { DesktopChannelState, DesktopChannelChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
++import type { DesktopFeedState, DesktopFeedChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
  import type { DesktopShortcutInput, ShortcutConfigSnapshot, ShortcutSaveResult } from '@deepseek-ai/dsh-client-shortcuts/protocol'
  import { contextBridge, ipcRenderer, webUtils } from 'electron'
  import { DESKTOP_IPC, SCHEME, type DshDesktopProductApi, type DesktopUpdatePresentation } from './ipc.ts'
-+import type { DesktopFeedState, DesktopFeedChangeResult } from '@deepseek-ai/dsh-client-ui-settings-general/types'
- import { PLATFORM_IPC } from './platform-ipc.ts'
- import { markDocumentPlatform, syncWindowFullscreen } from './preload-platform.ts'
- import { syncNativeTheme } from './preload-theme.ts'
-@@ -65,6 +66,10 @@ function createProductApi(): DshDesktopProductApi {
+@@ -66,6 +67,10 @@ function createProductApi(): DshDesktopProductApi {
        },
      },
      updates: {
@@ -251,44 +288,39 @@ index 26266b4f1c..afef898b89 100644
 +        get: () => ipcRenderer.invoke(DESKTOP_IPC.updatesFeedGet) as Promise<DesktopFeedState>,
 +        set: (owner: string) => ipcRenderer.invoke(DESKTOP_IPC.updatesFeedSet, owner) as Promise<DesktopFeedChangeResult>,
 +      },
-       status: () => ipcRenderer.invoke(DESKTOP_IPC.updatesStatus) as Promise<DesktopUpdatePresentation>,
-       open: () => ipcRenderer.invoke(DESKTOP_IPC.updatesOpen) as Promise<void>,
-       subscribe(listener) {
+       channels: {
+         get: () => ipcRenderer.invoke(DESKTOP_IPC.updatesChannelGet) as Promise<DesktopChannelState>,
+         set: channel => ipcRenderer.invoke(DESKTOP_IPC.updatesChannelSet, channel) as Promise<DesktopChannelChangeResult>,
 diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
-index 3b83cea08f..461019b506 100644
+index 475a5606..d7c43e71 100644
 --- a/apps/desktop/src/update-coordinator.ts
 +++ b/apps/desktop/src/update-coordinator.ts
-@@ -7,6 +7,8 @@ import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo }
+@@ -6,6 +6,8 @@ import { app } from 'electron'
+ import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo, type UpdateCheckResult } from 'electron-updater'
  import { gt, valid } from 'semver'
  import type { DesktopUpdateState } from './ipc.ts'
- import { DesktopUpdateHttpExecutor } from './update-http-executor.ts'
 +import { getUpdateFeed, type FeedReader } from './updateFeed.ts'
 +import { isForkCounterUpgrade, parseForkVersion } from './forkVersion.ts'
- import { DesktopUpdatePreparationError } from './update-error.ts'
- 
- const { autoUpdater } = electronUpdater
-@@ -56,6 +58,7 @@ export class DesktopUpdateCoordinator {
-     private readonly currentVersion: () => string = () => app.getVersion(),
+ import { DesktopUpdateHttpExecutor } from './updates/electron-updater/http-executor.ts'
+ import { DesktopUpdatePreparationError, downloadFailureDetails } from './update-error.ts'
+ import type { DesktopUpdateChannel } from './update-channel.ts'
+@@ -66,6 +68,7 @@ export class DesktopUpdateCoordinator {
      private readonly downloadResult?: (success: boolean, reason?: string) => void,
-     private readonly channel: 'nightly' | 'latest' = 'nightly',
+     private channel: DesktopUpdateChannel = 'nightly',
+     private readonly discard: (updater: AppUpdater) => Promise<void> = discardDesktopUpdate,
 +    private readonly feedReader?: FeedReader,
    ) {
      if (updater === autoUpdater) {
        // electron-updater omits this internal transport property from its public declarations.
-@@ -68,8 +71,11 @@ export class DesktopUpdateCoordinator {
+@@ -78,6 +81,7 @@ export class DesktopUpdateCoordinator {
      }
      this.updater.autoDownload = false
      this.updater.autoInstallOnAppQuit = false
 +    this.applyForkHubFeed()
-     this.updater.channel = channel
--    this.updater.allowPrerelease = channel === 'nightly'
-+    // Fork feed contains ONLY fork prereleases; always allow them here —
-+    // the fork-counter gate in doCheck(), not the channel flag, decides.
-+    this.updater.allowPrerelease = true
-     // Selecting a channel can enable downgrade in electron-updater.
-     this.updater.allowDowngrade = false
+     selectUpdateChannel(this.updater, channel)
      this.updater.on('download-progress', this.onProgress)
-@@ -80,6 +86,24 @@ export class DesktopUpdateCoordinator {
+     this.updater.on('update-downloaded', this.onDownloaded)
+@@ -87,6 +91,24 @@ export class DesktopUpdateCoordinator {
    /** Latest observable state; complete download identity remains main-process-owned. */
    get state(): DesktopUpdateState { return this.current }
  
@@ -310,18 +342,22 @@ index 3b83cea08f..461019b506 100644
 +    this.updater.allowPrerelease = true
 +  }
 +
-   /**
-    * Check metadata without downloading, joining any current check.
-    * @param manual - Whether a failed check must remain visible in the status indicator.
-@@ -189,8 +213,17 @@ export class DesktopUpdateCoordinator {
-       if (result === null) throw new Error('desktop update: no check result was returned')
+   /** Reason ordinary updates are suspended, independently of the last operation result. */
+   get configurationFailure(): 'startup' | 'cleanup' | undefined { return this.configurationError }
+ 
+@@ -137,6 +159,7 @@ export class DesktopUpdateCoordinator {
+       }
+       this.channel = channel
+       selectUpdateChannel(this.updater, channel)
++      this.applyForkHubFeed()
+       this.configurationError = undefined
+       this.setState({ phase: 'checking' })
+       const result = await this.doCheck()
+@@ -276,7 +299,14 @@ export class DesktopUpdateCoordinator {
+       this.cancellation = result.cancellationToken
        const version = result.updateInfo.version
        if (valid(version) === null) throw new Error('desktop update: feed version is invalid')
--      if (this.channel === 'latest' && version.includes('-')) throw new Error('desktop update: latest feed contains a prerelease')
--      this.candidate = result.isUpdateAvailable && gt(version, this.currentVersion()) ? version : undefined
-+      if (this.channel === 'latest' && version.includes('-') && parseForkVersion(version) === null) {
-+        throw new Error('desktop update: latest feed contains a prerelease')
-+      }
+-      this.release = result.isUpdateAvailable && gt(version, this.currentVersion())
 +      // ForkHub rebuild gate: an owner-stamped fork build installs only
 +      // over a same-owner, same-date, lower-counter build; stock<->fork
 +      // and cross-owner pairs refuse. Stock pairs use semver.
@@ -329,13 +365,13 @@ index 3b83cea08f..461019b506 100644
 +      const forkUpgrade = isForkCounterUpgrade(current, version)
 +      const stockUpgrade = parseForkVersion(current) === null
 +        && parseForkVersion(version) === null && gt(version, current)
-+      this.candidate = result.isUpdateAvailable && (forkUpgrade || stockUpgrade) ? version : undefined
++      this.release = result.isUpdateAvailable && (forkUpgrade || stockUpgrade)
+         ? { kind: 'checked', version } : { kind: 'none' }
        return this.setState(this.candidate === undefined ? { phase: 'idle' } : { phase: 'available', version })
      } catch (error) {
-       return this.failure(error, 'check')
 diff --git a/apps/desktop/src/updateFeed.ts b/apps/desktop/src/updateFeed.ts
 new file mode 100644
-index 0000000000..d1520ef992
+index 00000000..d1520ef9
 --- /dev/null
 +++ b/apps/desktop/src/updateFeed.ts
 @@ -0,0 +1,123 @@
@@ -464,7 +500,7 @@ index 0000000000..d1520ef992
 +}
 diff --git a/apps/desktop/tests/forkhub-fork-version.spec.ts b/apps/desktop/tests/forkhub-fork-version.spec.ts
 new file mode 100644
-index 0000000000..2fb8c08928
+index 00000000..2fb8c089
 --- /dev/null
 +++ b/apps/desktop/tests/forkhub-fork-version.spec.ts
 @@ -0,0 +1,33 @@
@@ -503,7 +539,7 @@ index 0000000000..2fb8c08928
 +})
 diff --git a/apps/desktop/tests/forkhub-update-feed.spec.ts b/apps/desktop/tests/forkhub-update-feed.spec.ts
 new file mode 100644
-index 0000000000..2b6cb62e96
+index 00000000..2b6cb62e
 --- /dev/null
 +++ b/apps/desktop/tests/forkhub-update-feed.spec.ts
 @@ -0,0 +1,68 @@
@@ -576,23 +612,21 @@ index 0000000000..2b6cb62e96
 +  })
 +})
 diff --git a/apps/desktop/tests/update-coordinator.spec.ts b/apps/desktop/tests/update-coordinator.spec.ts
-index 3aef0bc60f..dc1c03fd5c 100644
+index b65f825b..6e1bae86 100644
 --- a/apps/desktop/tests/update-coordinator.spec.ts
 +++ b/apps/desktop/tests/update-coordinator.spec.ts
-@@ -252,7 +252,10 @@ it('keeps a stable-version nightly installation on nightly and rejects prereleas
-   expect(nightly.updater.channel).toBe('nightly')
-   const latest = fixture('latest', '1.0.0')
-   expect(latest.updater.channel).toBe('latest')
--  expect(latest.updater.allowPrerelease).toBe(false)
+@@ -247,6 +247,9 @@ it.each([new DesktopUpdatePreparationError('stop-failed', 'private diagnostic'),
+ it.each(['nightly', 'stable'] as const)('accepts newer prereleases on the selected %s channel', async (channel) => {
+   const f = fixture(channel, '1.0.0')
+   expect(f.updater.channel).toBe(channel)
 +  // ForkHub feed: prereleases stay allowed on every channel (the feed
 +  // holds ONLY fork builds); the fork-counter gate in doCheck(), not the
-+  // channel flag, refuses stock prereleases on latest.
-+  expect(latest.updater.allowPrerelease).toBe(true)
-   expect(latest.updater.allowDowngrade).toBe(false)
-   expect((await latest.coordinator.check()).phase).toBe('error')
-   expect(latest.downloadUpdate).not.toHaveBeenCalled()
++  // channel flag, refuses stock prereleases on stable.
+   expect(f.updater.allowPrerelease).toBe(true)
+   expect(f.updater.allowDowngrade).toBe(false)
+   for (const version of ['1.1.0-alpha.1', '1.1.0-rc.2', '1.1.0']) {
 diff --git a/apps/desktop/tsconfig.host.json b/apps/desktop/tsconfig.host.json
-index 7078ac8198..ab23acee02 100644
+index 2701caf5..0b4da93e 100644
 --- a/apps/desktop/tsconfig.host.json
 +++ b/apps/desktop/tsconfig.host.json
 @@ -29,6 +29,9 @@
@@ -607,7 +641,7 @@ index 7078ac8198..ab23acee02 100644
      },
 diff --git a/packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css b/packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css
 new file mode 100644
-index 0000000000..200a52495e
+index 00000000..200a5249
 --- /dev/null
 +++ b/packages/client/ui-settings-general/src/client/DesktopFeedRow.module.css
 @@ -0,0 +1,19 @@
@@ -632,7 +666,7 @@ index 0000000000..200a52495e
 +}
 diff --git a/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx b/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
 new file mode 100644
-index 0000000000..d29996bd3e
+index 00000000..d29996bd
 --- /dev/null
 +++ b/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
 @@ -0,0 +1,51 @@
@@ -689,7 +723,7 @@ index 0000000000..d29996bd3e
 +}
 diff --git a/packages/client/ui-settings-general/src/client/desktop-feed-source.ts b/packages/client/ui-settings-general/src/client/desktop-feed-source.ts
 new file mode 100644
-index 0000000000..045fa1ab53
+index 00000000..045fa1ab
 --- /dev/null
 +++ b/packages/client/ui-settings-general/src/client/desktop-feed-source.ts
 @@ -0,0 +1,82 @@
@@ -776,21 +810,23 @@ index 0000000000..045fa1ab53
 +  dispose(): void { this.live = false }
 +}
 diff --git a/packages/client/ui-settings-general/src/client/index.ts b/packages/client/ui-settings-general/src/client/index.ts
-index 0e6fae5e58..5c9151ef07 100644
+index 3ee2c01e..0d19017e 100644
 --- a/packages/client/ui-settings-general/src/client/index.ts
 +++ b/packages/client/ui-settings-general/src/client/index.ts
-@@ -34,7 +34,9 @@ import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client
+@@ -34,9 +34,11 @@ import type { ShortcutCommandId } from '@deepseek-ai/dsh-client-shortcuts/client
  import { createSettingsShellStore } from './shell-store.ts'
  import { SettingsRoot } from './SettingsRoot.tsx'
  import { DesktopUpdateBadge } from './DesktopUpdateIndicator.tsx'
 -import type { DesktopUpdateBridge } from '../types.ts'
 +import type { DesktopUpdateBridge, DesktopFeedBridge } from '../types.ts'
+ import { DesktopChannelSource } from './desktop-channel-source.ts'
+ import { DesktopChannelRow, DesktopChannelToast } from './DesktopChannelRow.tsx'
 +import { DesktopFeedSource } from './desktop-feed-source.ts'
 +import { DesktopFeedRow } from './DesktopFeedRow.tsx'
  import { DesktopUpdateSource } from './desktop-update-source.ts'
  import { CloseLabel, HeaderContent, TriggerContent } from './chrome.tsx'
  import { GeneralSection } from './GeneralSection.tsx'
-@@ -102,6 +104,19 @@ export function apply(ctx: ClientContext): void {
+@@ -104,6 +106,19 @@ export function apply(ctx: ClientContext): void {
    ctx.effect(() => ctx.locale.register(NS, { zh, en, ja, es, fr, de, ru, pt }), 'ui-settings-general: dictionaries')
    const connection = ctx.get('connection') as ConnectionHandle
    const carrier = (globalThis as typeof globalThis & { dshDesktop?: { protocolVersion: number; updates?: DesktopUpdateBridge } }).dshDesktop
@@ -809,12 +845,12 @@ index 0e6fae5e58..5c9151ef07 100644
 +  }
    const desktopUpdate = new DesktopUpdateSource(carrier?.protocolVersion === 1 ? carrier.updates : undefined)
    ctx.effect(() => () => { desktopUpdate.dispose() }, 'ui-settings-general: desktop update carrier')
-   ctx.slots.inject('sidebar.toggle.badge', () => ctx.slots.register({
+   const channelBridge = carrier?.protocolVersion === 1 ? carrier.updates?.channels : undefined
 diff --git a/packages/client/ui-settings-general/src/client/locales.ts b/packages/client/ui-settings-general/src/client/locales.ts
-index 58afc6bba7..64142f5186 100644
+index a6a6bc28..451a0ec5 100644
 --- a/packages/client/ui-settings-general/src/client/locales.ts
 +++ b/packages/client/ui-settings-general/src/client/locales.ts
-@@ -44,6 +44,12 @@ export const zh = {
+@@ -67,6 +67,12 @@ export const zh = {
    'hostRelease.unknown': '未解析',
    'hostRelease.reload': '刷新以加载新版本',
    'hostRelease.later': '暂不刷新',
@@ -827,7 +863,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<string, string>
  
  /** The settings namespace key union. */
-@@ -93,6 +99,12 @@ export const en = {
+@@ -139,6 +145,12 @@ export const en = {
    'hostRelease.unknown': 'Unknown',
    'hostRelease.reload': 'Reload to load the new version',
    'hostRelease.later': 'Not now',
@@ -840,7 +876,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<SettingsKey, string>
  
  /** Japanese copy, checked against the English keys. */
-@@ -139,6 +151,12 @@ export const ja = {
+@@ -208,6 +220,12 @@ export const ja = {
    'hostRelease.unknown': '不明',
    'hostRelease.reload': '再読み込みして新しいバージョンを読み込む',
    'hostRelease.later': '後で',
@@ -853,7 +889,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<keyof typeof en, string>
  
  /** Spanish dictionary, checked against the English keys. */
-@@ -185,6 +203,12 @@ export const es = {
+@@ -277,6 +295,12 @@ export const es = {
    'hostRelease.unknown': 'Desconocido',
    'hostRelease.reload': 'Recargar para cargar la nueva versión.',
    'hostRelease.later': 'Ahora no',
@@ -866,7 +902,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<keyof typeof en, string>
  
  /** French dictionary, checked against the English keys. */
-@@ -231,6 +255,12 @@ export const fr = {
+@@ -346,6 +370,12 @@ export const fr = {
    'hostRelease.unknown': 'Inconnu',
    'hostRelease.reload': 'Recharger pour charger la nouvelle version',
    'hostRelease.later': 'Pas maintenant',
@@ -879,7 +915,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<keyof typeof en, string>
  
  /** German dictionary, checked against the English keys. */
-@@ -277,6 +307,12 @@ export const de = {
+@@ -415,6 +445,12 @@ export const de = {
    'hostRelease.unknown': 'Unbekannt',
    'hostRelease.reload': 'Neu laden, um die neue Version zu laden',
    'hostRelease.later': 'Nicht jetzt',
@@ -892,7 +928,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<keyof typeof en, string>
  
  /** Russian dictionary, checked against the English keys. */
-@@ -323,6 +359,12 @@ export const ru = {
+@@ -484,6 +520,12 @@ export const ru = {
    'hostRelease.unknown': 'Неизвестно',
    'hostRelease.reload': 'Перезагрузите, чтобы загрузить новую версию',
    'hostRelease.later': 'Не сейчас',
@@ -905,7 +941,7 @@ index 58afc6bba7..64142f5186 100644
  } satisfies Record<keyof typeof en, string>
  
  /** Portuguese dictionary, checked against the English keys. */
-@@ -369,4 +411,10 @@ export const pt = {
+@@ -553,4 +595,10 @@ export const pt = {
    'hostRelease.unknown': 'Desconhecido',
    'hostRelease.reload': 'Recarregue para carregar a nova versão',
    'hostRelease.later': 'Agora não',
@@ -917,10 +953,10 @@ index 58afc6bba7..64142f5186 100644
 +  'desktop.feed.dismiss': 'Dispensar',
  } satisfies Record<keyof typeof en, string>
 diff --git a/packages/client/ui-settings-general/src/types.ts b/packages/client/ui-settings-general/src/types.ts
-index 9aa0ea95e3..e4a04ebf1c 100644
+index 33edb975..9e8c206d 100644
 --- a/packages/client/ui-settings-general/src/types.ts
 +++ b/packages/client/ui-settings-general/src/types.ts
-@@ -28,6 +28,34 @@ export interface DesktopUpdateBridge {
+@@ -34,6 +34,34 @@ export interface DesktopUpdateBridge {
    subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
  }
  
@@ -957,7 +993,7 @@ index 9aa0ea95e3..e4a04ebf1c 100644
    readonly presentation?: DesktopUpdatePresentation
 diff --git a/packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts b/packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts
 new file mode 100644
-index 0000000000..b6b87acf05
+index 00000000..b6b87acf
 --- /dev/null
 +++ b/packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts
 @@ -0,0 +1,64 @@
@@ -1025,3 +1061,6 @@ index 0000000000..b6b87acf05
 +  expect(f.source.store.getSnapshot().notice).toBeUndefined()
 +  f.source.dispose()
 +})
+-- 
+2.43.0
+
