@@ -8,6 +8,7 @@
 # on PATH (shared workflow installs bun; `bun add -g web-ext` when
 # absent) and AMO_JWT_ISSUER / AMO_JWT_SECRET in env (repo Secrets).
 set -eu
+set -o pipefail
 
 DIST="${GITHUB_WORKSPACE:?}/dist"
 REPO="${GITHUB_REPOSITORY:?}"
@@ -128,6 +129,24 @@ grep -q "\"id\": \"$ADDON_ID\"" "$MANIFEST" || fail_soft "ID swap failed"
 grep -q '"name": "OpenDia"' "$MANIFEST" \
   || fail_soft "upstream manifest name changed — drift: re-check INTENT.md rename rationale"
 
+# --- Version stamp: AMO versions are unique per add-on ID, and any prior
+# sign (local or CI) already owns the upstream manifest version.
+# Stamp <upstream>.<fhN> (e.g. 1.1.1 -> 1.1.1.4): valid toolkit version
+# format, sorts above the base but below any future upstream bump.
+# The mapping is recorded in PROVENANCE.md.
+UP_VER=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['version'])")
+STAMP_VER="$UP_VER.$N"
+python3 - "$MANIFEST" "$STAMP_VER" <<'EOF'
+import json, sys
+p, v = sys.argv[1], sys.argv[2]
+m = json.load(open(p)); m['version'] = v
+with open(p, 'w') as f:
+    json.dump(m, f, indent=2)
+    f.write('\n')
+EOF
+say "version stamped: $UP_VER -> $STAMP_VER"
+grep -q "\"version\": \"$STAMP_VER\"" "$MANIFEST" || fail_soft "version stamp failed"
+
 # --- MIT attribution: upstream zip ships NO license file; the MIT condition
 # requires the copyright + permission notice in all copies. Inject verbatim.
 if ! unzip -l "$WORK/upstream.zip" | grep -qiE "LICENSE(\.txt|\.md)?$"; then
@@ -179,11 +198,12 @@ cp "$SIGNED" "$DIST/$OUT"
   echo "- License: MIT, Copyright (c) 2025 Aeon Inc — full text inside"
   echo "  the .xpi (\`LICENSE\` at zip root) and at"
   echo "  https://github.com/aeonfun/opendia/blob/$TAG/LICENSE"
-  echo "- Transform: ONLY \`applications.gecko.id\`:"
+  echo "- Transform: ONLY \`applications.gecko.id\` + version stamp:"
   echo "  \`opendia@aaronjmars.com\` → \`$ADDON_ID\` (catalog-owned AMO"
   echo "  identity; the upstream ID is registered to the author's account"
-  echo "  and 403s on our keys). Add-on name stays \`OpenDia\`; no code,"
-  echo "  UI, or permission change."
+  echo "  and 403s on our keys); version \`$UP_VER\` → \`$STAMP_VER\`"
+  echo "  (AMO versions are unique per add-on ID). Add-on name stays"
+  echo "  \`OpenDia\`; no code, UI, or permission change."
   echo "- Channel: unlisted (self-distributed via this catalog)"
   echo "- Install: \`about:addons\` → gear → Install Add-on From File"
   echo "- Sunset: when upstream ships a signed XPI (asset containing"
