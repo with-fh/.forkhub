@@ -10,11 +10,13 @@
   "version_suffix": "fh",
   "build_runs_on": [
     "macos-26",
-    "windows-latest"
+    "windows-latest",
+    "ubuntu-24.04"
   ],
   "build_skip_markers": {
     "mac": "*.dmg",
-    "win": "*.exe"
+    "win": "*.exe",
+    "linux": "*.AppImage"
   },
   "tag_match_pattern": "^dsh-v[0-9]+\\.[0-9]+\\.[0-9]+-",
   "tag_pool_prefix": "dsh-v"

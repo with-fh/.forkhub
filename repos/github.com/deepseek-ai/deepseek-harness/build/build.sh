@@ -26,7 +26,7 @@ DIST="${GITHUB_WORKSPACE:?}/dist"
 REPO="${GITHUB_REPOSITORY:?}"
 TAG="${UPSTREAM_TAG:?}"
 LOG="$DIST/BUILD_LOG.md"
-# OS leg identity from the shared workflow (mac|win). Hand-runs default
+# OS leg identity from the shared workflow (mac|win|linux). Hand-runs default
 # to the host platform's leg.
 OS_KEY="${FORKHUB_OS_KEY:-mac}"
 OS_MARKER="${FORKHUB_OS_MARKER:-}"
@@ -220,8 +220,22 @@ case "$OS_KEY" in
     (cd apps/desktop && pnpm run package:win:x64:unsigned -- --build-version "$FH_VERSION" >>"$LOG" 2>&1) \
       || fail_soft "win x64 pack failed (see BUILD_LOG.md)"
     ;;
+  linux)
+    # Linux leg (ubuntu-24.04 runner — see upstream.json build_runs_on).
+    # Electron 44 smoke steps need an X server + no sandbox on headless
+    # runners (ImBIOS PR #5 runs 43546677096/43547554151); the .env.linux
+    # equivalent is localLinuxPackageEnvironment (codeless by design).
+    command -v xvfb-run >/dev/null 2>&1 || {
+      say "installing xvfb for headless Electron smoke"
+      (sudo apt-get update >>"$LOG" 2>&1 || true) && sudo apt-get install -y xvfb >>"$LOG" 2>&1 \
+        || say "xvfb install failed; smoke may SIGSEGV (see BUILD_LOG.md)"
+    }
+    say "packaging linux unsigned (x64 AppImage)"
+    (cd apps/desktop && DSH_UPDATE_OWNER="$OWNER" DSH_DESKTOP_UPDATE_ENV=production ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a pnpm run "package:linux:x64:unsigned" -- --build-version "$FH_VERSION" >>"$LOG" 2>&1) \
+      || fail_soft "linux x64 pack failed (see BUILD_LOG.md)"
+    ;;
   *)
-    fail_soft "unknown OS leg: $OS_KEY (expected mac|win; linux ships downstream from ImBIOS)"
+    fail_soft "unknown OS leg: $OS_KEY (expected mac|win|linux)"
     ;;
 esac
 
@@ -233,10 +247,10 @@ esac
 # resolve per platform and carry the stamped ForkHub version.
 mkdir -p "$DIST/forkhub"
 MOVED=0
-for target in mac-arm64 mac-x64 win-x64; do
+for target in mac-arm64 mac-x64 win-x64 linux-x64; do
   ART="apps/desktop/.desktop-build/targets/$target/unsigned-artifacts"
   [ -d "$ART" ] || continue
-  for f in "$ART"/*.dmg "$ART"/*.zip "$ART"/*.exe "$ART"/latest-mac.yml "$ART"/latest.yml; do
+  for f in "$ART"/*.dmg "$ART"/*.zip "$ART"/*.exe "$ART"/*.AppImage "$ART"/latest-mac.yml "$ART"/latest.yml "$ART"/latest-linux.yml; do
     [ -e "$f" ] || continue
     mv "$f" "$DIST/forkhub"/
     MOVED=$((MOVED + 1))
@@ -263,9 +277,13 @@ if [ -e "$DIST/forkhub/latest.yml" ]; then
   cp "$DIST/forkhub/latest.yml" "$DIST/forkhub/fh.yml" || fail_soft "fh.yml copy failed"
   say "fh.yml emitted"
 fi
+if [ -e "$DIST/forkhub/latest-linux.yml" ]; then
+  cp "$DIST/forkhub/latest-linux.yml" "$DIST/forkhub/fh-linux.yml" || fail_soft "fh-linux.yml copy failed"
+  say "fh-linux.yml emitted"
+fi
 # The updater feed resolves the manifests per platform: each emitted pair
 # must exist and must carry the stamped ForkHub version.
-for yml in latest-mac.yml fh-mac.yml latest.yml fh.yml; do
+for yml in latest-mac.yml fh-mac.yml latest.yml fh.yml latest-linux.yml fh-linux.yml; do
   [ -e "$DIST/forkhub/$yml" ] || continue
   grep -q "version: $FH_VERSION" "$DIST/forkhub/$yml" 2>/dev/null \
     || fail_soft "$yml missing or version mismatch (expected $FH_VERSION)"

@@ -1,0 +1,1942 @@
+From 12cb561ee66e3aaff306b1eb53049e1c4756b86e Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 13:53:07 +0700
+Subject: [PATCH 01/13] linux layer on top of channel (incl. package-selection
+ linux routing fix)
+
+---
+ apps/desktop/.env.linux.example               |  33 ++++++
+ apps/desktop/package.json                     |   5 +
+ .../desktop-auto-update-environment.mjs       |  11 +-
+ apps/desktop/scripts/desktop-build-paths.mjs  |  13 ++-
+ .../scripts/desktop-package-environment.mjs   |  33 +++++-
+ apps/desktop/scripts/desktop-publish-route.ts |   6 +-
+ .../scripts/desktop-publish-targets.ts        |   3 +-
+ .../scripts/desktop-toolchain-preflight.ts    |   8 +-
+ apps/desktop/scripts/desktop-upload-plan.ts   |  15 ++-
+ .../scripts/electron-builder-config.mjs       |   9 ++
+ apps/desktop/scripts/package-target.ts        |  29 +++--
+ apps/desktop/scripts/upload-target.ts         |   4 +-
+ apps/desktop/src/ipc.ts                       |   6 +
+ apps/desktop/src/linuxAutostart.ts            | 108 ++++++++++++++++++
+ apps/desktop/src/main.ts                      |  31 ++++-
+ apps/desktop/src/mandatory-update-policy.ts   |   2 +-
+ apps/desktop/src/preload-app.ts               |   4 +
+ .../desktop-auto-update-environment.spec.ts   |  13 ++-
+ .../desktop/tests/desktop-build-paths.spec.ts |   9 +-
+ .../tests/desktop-package-selection.spec.ts   |   8 +-
+ .../electron-builder-config-linux.spec.ts     |  25 ++++
+ apps/desktop/tests/linux-autostart.spec.ts    |  72 ++++++++++++
+ .../tests/linux-dock-association.spec.ts      |  21 ++++
+ apps/desktop/tests/package-target.spec.ts     |   6 +-
+ .../src/client/DesktopFeedRow.tsx             |   7 +-
+ .../ui-settings-general/src/client/locales.ts |   8 ++
+ 26 files changed, 440 insertions(+), 49 deletions(-)
+ create mode 100644 apps/desktop/.env.linux.example
+ create mode 100644 apps/desktop/src/linuxAutostart.ts
+ create mode 100644 apps/desktop/tests/electron-builder-config-linux.spec.ts
+ create mode 100644 apps/desktop/tests/linux-autostart.spec.ts
+ create mode 100644 apps/desktop/tests/linux-dock-association.spec.ts
+
+diff --git a/apps/desktop/.env.linux.example b/apps/desktop/.env.linux.example
+new file mode 100644
+index 00000000..ace1b659
+--- /dev/null
++++ b/apps/desktop/.env.linux.example
+@@ -0,0 +1,33 @@
++# Release configuration only; local --unsigned builds ignore this file.
++# Copy to .env.linux (Git ignored). Use UTF-8 and quote secrets containing # or spaces.
++# Values are not shell-expanded.
++DSH_DESKTOP_APP_ID=com.deepseek.dsh
++DSH_DESKTOP_AUTO_UPDATE_ENV=test
++DOWNLOAD_TEST_ORIGIN=
++# Required for test releases: 32 lowercase hexadecimal characters from a secure random generator.
++# Generate once per release batch; retain it for retries and versions testing upgrades within that batch.
++DOWNLOAD_TEST_RELEASE_ID=
++
++# Optional npm registry for the bundled dsh runtime install; defaults to https://registry.npmjs.org/.
++# A local mirror such as https://registry.npmmirror.com speeds up repeated local packages.
++# DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com
++
++# The selected mandatory-update origin is required for release and preparation builds.
++DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=
++DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=
++# Set approved login origins for test builds; omit allowedAuthOrigins for production.
++# Optional polling and fallback-page options belong in the same JSON value.
++# The fallback-page allowlist defaults to the selected service origin.
++DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://login.example.com"]}'
++
++# Optional upload configuration; packaging does not require these credentials.
++# DOWNLOAD_TEST_COS_BUCKET=
++# DOWNLOAD_TEST_COS_SECRET_ID=
++# DOWNLOAD_TEST_COS_SECRET_KEY=
++# DOWNLOAD_PROD_COS_BUCKET=
++# DOWNLOAD_PROD_COS_SECRET_ID=
++# DOWNLOAD_PROD_COS_SECRET_KEY=
++
++# Production fixed downloads require teo:CreatePurgeTask permission on the COS identity.
++# Required for upload:latest:* and purge:latest; configure the download domain's EO zone.
++# DOWNLOAD_PROD_EO_ZONE_ID=
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index f13ba317..8ab9d9b9 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -39,12 +39,17 @@
+     "package:win:x64": "tsx scripts/package-target.ts win-x64",
+     "package:win:x64:unsigned": "tsx scripts/package-target.ts win-x64 --unsigned",
+     "package:win:x64:dir": "tsx scripts/package-target.ts win-x64 --dir",
++    "package:linux:x64": "tsx scripts/package-target.ts linux-x64",
++    "package:linux:x64:unsigned": "tsx scripts/package-target.ts linux-x64 --unsigned",
++    "package:linux:x64:dir": "tsx scripts/package-target.ts linux-x64 --dir",
+     "upload:mac:arm64": "tsx scripts/upload-target.ts mac-arm64",
+     "upload:mac:x64": "tsx scripts/upload-target.ts mac-x64",
+     "upload:win:x64": "tsx scripts/upload-target.ts win-x64",
++    "upload:linux:x64": "tsx scripts/upload-target.ts linux-x64",
+     "upload:latest:mac:arm64": "tsx scripts/upload-target.ts mac-arm64 --latest",
+     "upload:latest:mac:x64": "tsx scripts/upload-target.ts mac-x64 --latest",
+     "upload:latest:win:x64": "tsx scripts/upload-target.ts win-x64 --latest",
++    "upload:latest:linux:x64": "tsx scripts/upload-target.ts linux-x64 --latest",
+     "purge:latest": "tsx scripts/upload-target.ts --latest --purge-only"
+   },
+   "dependencies": {
+diff --git a/apps/desktop/scripts/desktop-auto-update-environment.mjs b/apps/desktop/scripts/desktop-auto-update-environment.mjs
+index 24aaa0ea..2dcfbd7c 100644
+--- a/apps/desktop/scripts/desktop-auto-update-environment.mjs
++++ b/apps/desktop/scripts/desktop-auto-update-environment.mjs
+@@ -33,7 +33,7 @@ const UPDATE_ENVIRONMENTS = {
+   },
+ }
+ 
+-const UPDATE_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
++const UPDATE_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ /**
+  * Name the fixed installer object shared by uploading and cache refresh.
+@@ -42,6 +42,7 @@ const UPDATE_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
+  */
+ export function desktopLatestInstallerFilename(target) {
+   if (!UPDATE_TARGETS.has(target)) throw new Error(`desktop upload: unsupported target ${target}`)
++  if (target === 'linux-x64') return 'dsh-latest-linux-x64.AppImage'
+   const windows = target === 'win-x64'
+   return `dsh-latest-${windows ? 'windows' : 'macos'}-${target === 'mac-arm64' ? 'arm64' : 'x64'}.${windows ? 'exe' : 'dmg'}`
+ }
+@@ -106,11 +107,11 @@ export function desktopUpdateMetadataFilename(version, platform, channel = 'nigh
+   if (valid(version) === null) {
+     throw new Error(`desktop auto-update: invalid Desktop version ${JSON.stringify(version)}`)
+   }
+-  if (platform !== 'darwin' && platform !== 'win32') {
++  if (platform !== 'darwin' && platform !== 'win32' && platform !== 'linux') {
+     throw new Error(`desktop auto-update: unsupported metadata platform ${platform}`)
+   }
+   resolveDesktopUpdateChannel({ DSH_DESKTOP_UPDATE_CHANNEL: channel })
+-  return `${channel}${platform === 'darwin' ? '-mac' : ''}.yml`
++  return `${channel}${platform === 'darwin' ? '-mac' : platform === 'linux' ? '-linux' : ''}.yml`
+ }
+ 
+ /**
+@@ -157,7 +158,7 @@ function httpsOrigin(value, name) {
+  * @param {NodeJS.ProcessEnv} env - Packaging or upload environment.
+  * @param {NodeJS.Platform} platform - Target Node.js platform.
+  * @param {string} arch - Target Node.js architecture.
+- * @returns {{ environment: 'test' | 'production', channel: 'nightly' | 'stable', target: 'mac-arm64' | 'mac-x64' | 'win-x64', origin: string, publicUrl: string, keyPrefix: string, binaryKeyPrefix: string }} Resolved updater configuration.
++ * @returns {{ environment: 'test' | 'production', channel: 'nightly' | 'stable', target: 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64', origin: string, publicUrl: string, keyPrefix: string, binaryKeyPrefix: string }} Resolved updater configuration.
+  * @throws {Error} When the test deployment lacks a valid HTTPS origin or a 32-character lowercase hexadecimal release ID.
+  */
+ export function resolveDesktopAutoUpdateConfig(env, platform, arch) {
+@@ -196,7 +197,7 @@ export function resolveDesktopAutoUpdateConfig(env, platform, arch) {
+  * @param {NodeJS.ProcessEnv} env - Upload environment.
+  * @param {NodeJS.Platform} platform - Target Node.js platform.
+  * @param {string} arch - Target Node.js architecture.
+- * @returns {{ environment: 'test' | 'production', channel: 'nightly' | 'stable', target: 'mac-arm64' | 'mac-x64' | 'win-x64', origin: string, publicUrl: string, keyPrefix: string, binaryKeyPrefix: string, bucket: string, secretIdEnvName: string, secretKeyEnvName: string }} Resolved upload configuration.
++ * @returns {{ environment: 'test' | 'production', channel: 'nightly' | 'stable', target: 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64', origin: string, publicUrl: string, keyPrefix: string, binaryKeyPrefix: string, bucket: string, secretIdEnvName: string, secretKeyEnvName: string }} Resolved upload configuration.
+  * @throws {Error} When the selected deployment lacks a bucket or valid updater configuration.
+  */
+ export function resolveDesktopUploadConfig(env, platform, arch) {
+diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
+index edfd9cdf..86077edc 100644
+--- a/apps/desktop/scripts/desktop-build-paths.mjs
++++ b/apps/desktop/scripts/desktop-build-paths.mjs
+@@ -4,14 +4,14 @@ import { isAbsolute, join, resolve } from 'node:path'
+ 
+ const APP_ROOT = resolve(import.meta.dirname, '..')
+ const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
+-const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
++const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ /**
+  * Resolve the fixed build target selected by a packaging environment.
+  * @param {NodeJS.ProcessEnv} env - Packaging environment.
+  * @param {NodeJS.Platform} hostPlatform - Build-host platform used when no target override exists.
+  * @param {string} hostArch - Build-host architecture used when no target override exists.
+- * @returns {'mac-arm64' | 'mac-x64' | 'win-x64'} Supported Desktop target name.
++ * @returns {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} Supported Desktop target name.
+  */
+ export function resolveDesktopBuildTarget(
+   env = process.env,
+@@ -26,7 +26,7 @@ export function resolveDesktopBuildTarget(
+   if (!SUPPORTED_TARGETS.has(target)) {
+     throw new Error(`desktop build paths: unsupported target ${target}`)
+   }
+-  return /** @type {'mac-arm64' | 'mac-x64' | 'win-x64'} */ (target)
++  return /** @type {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} */ (target)
+ }
+ 
+ function assertSupportedTarget(target) {
+@@ -37,7 +37,7 @@ function assertSupportedTarget(target) {
+ 
+ /**
+  * Return the mutable preparation and artifact directories owned by one release target.
+- * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target - Supported Desktop target name.
++ * @param {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} target - Supported Desktop target name.
+  * @param {NodeJS.ProcessEnv} environment - Packaging environment with an optional absolute cache directory.
+  * @returns {{ root: string, artifacts: string, unsignedArtifacts: string, unnotarizedArtifacts: string, runtime: string, packageSet: string, dsh: string, dshPnpm: string, electron: string, packedDsh: string, packedVendor: string, packedLandlock: string, downloads: string, pnpmStore: string }} Target paths plus shared download and package caches.
+  */
+@@ -70,8 +70,8 @@ export function desktopTargetBuildPaths(target, environment = process.env) {
+ /**
+  * Return the platform and architecture of the payload one release target prepares.
+  * Windows is prepared as x64 only, so this differs from the build host on an arm64 Windows machine.
+- * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target - Supported Desktop target name.
+- * @returns {{ platform: 'darwin' | 'win32', arch: 'arm64' | 'x64' }} Platform and architecture of the prepared payload.
++ * @param {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} target - Supported Desktop target name.
++ * @returns {{ platform: 'darwin' | 'win32' | 'linux', arch: 'arm64' | 'x64' }} Platform and architecture of the prepared payload.
+  */
+ export function desktopTargetPlatform(target) {
+   assertSupportedTarget(target)
+@@ -79,6 +79,7 @@ export function desktopTargetPlatform(target) {
+     'mac-arm64': { platform: 'darwin', arch: 'arm64' },
+     'mac-x64': { platform: 'darwin', arch: 'x64' },
+     'win-x64': { platform: 'win32', arch: 'x64' },
++    'linux-x64': { platform: 'linux', arch: 'x64' },
+   })
+   return targets[target]
+ }
+diff --git a/apps/desktop/scripts/desktop-package-environment.mjs b/apps/desktop/scripts/desktop-package-environment.mjs
+index 3d3a97ef..41282a4b 100644
+--- a/apps/desktop/scripts/desktop-package-environment.mjs
++++ b/apps/desktop/scripts/desktop-package-environment.mjs
+@@ -36,13 +36,26 @@ export function localMacOSPackageEnvironment(environment = process.env) {
+   }
+ }
+ 
++/**
++ * Select local Linux test defaults without reading dotenv files or inheriting release settings.
++ * @param {NodeJS.ProcessEnv} environment Parent environment, retained for build tools and networking.
++ * @returns {NodeJS.ProcessEnv} Unsigned build environment with the standard application identifier and no update policy.
++ */
++export function localLinuxPackageEnvironment(environment = process.env) {
++  return {
++    ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name) || AMBIENT_KEEP_SETTING.test(name))),
++    DSH_DESKTOP_APP_ID: 'com.deepseek.harness',
++    DSH_DESKTOP_UNSIGNED: '1',
++  }
++}
++
+ /**
+  * Read a machine preset when selected, otherwise the target's required dotenv; no ambient release fallback.
+  * PACKAGE_MACOS_ZIP_COMPRESSION_LEVEL overrides the Mac file setting with 3 or 7; an empty value is invalid.
+  * Any defined Mac ZIP override rejects Windows, including an empty value; nonempty Windows overrides reject macOS.
+  * PACKAGE_TEST_RELEASE_ID overrides the test preset only; blank retains its configured ID.
+  * PACKAGE_WINDOWS_COMPRESSION_LEVEL selects 3 or 7 for Windows workflow builds; blank retains the file setting.
+- * @param {'win32' | 'darwin'} platform Target platform.
++ * @param {'win32' | 'darwin' | 'linux'} platform Target platform.
+  * @param {NodeJS.ProcessEnv} environment Parent environment, retained only for unrelated build tools.
+  * @param {string} appRoot Desktop application directory; relative credential paths resolve here.
+  * @param {{ unsigned?: boolean, prepareOnly?: boolean }} options Unsigned presets and Windows preparation-only presets never read signing credentials.
+@@ -61,14 +74,21 @@ export function loadDesktopPackageEnvironment(platform, environment = process.en
+     if (!['3', '7'].includes(zipCompression)) throw new Error('desktop package: workflow ZIP compression must be 3 or 7')
+   }
+   const preset = environment.DSH_PACKAGING_PRESET
+-  let path = join(appRoot, platform === 'win32' ? '.env.windows' : '.env.macos')
++  if (platform === 'linux' && preset === undefined) {
++    return {
++      ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name) || AMBIENT_KEEP_SETTING.test(name))),
++      ...readSettings(join(appRoot, '.env.linux'), name => SHARED_SETTING.test(name)),
++      ...(environment.DSH_DESKTOP_UPDATE_CHANNEL === undefined ? {} : { DSH_DESKTOP_UPDATE_CHANNEL: environment.DSH_DESKTOP_UPDATE_CHANNEL }),
++    }
++  }
++  let path = join(appRoot, platform === 'win32' ? '.env.windows' : platform === 'darwin' ? '.env.macos' : '.env.linux')
+   if (preset !== undefined) {
+     if (preset !== 'test' && preset !== 'production') throw new Error('desktop package: preset must be test or production')
+     const root = environment.DSH_PACKAGING_CONFIG_DIR
+     if (!root || !isAbsolute(root)) throw new Error('desktop package: DSH_PACKAGING_CONFIG_DIR must be an absolute directory')
+     path = join(root, 'presets', `${preset}.env`)
+   }
+-  const platformSetting = platform === 'win32' ? WINDOWS_SETTING : MACOS_SETTING
++  const platformSetting = platform === 'win32' ? WINDOWS_SETTING : platform === 'darwin' ? MACOS_SETTING : SHARED_SETTING
+   const publicPlatformSetting = platform === 'win32'
+     ? /^DSH_DESKTOP_WINDOWS_(?:SIGNATURE_CACHE_(?:DIR|CONCURRENCY)|PACK_CONCURRENCY|COMPRESSION_LEVEL)$/u
+     : /^DSH_DESKTOP_MACOS_(?:SIGNATURE_CACHE_DIR|PACK_CONCURRENCY|ZIP_COMPRESSION_LEVEL|DOWNLOAD_PROXY|NOTARIZATION_PROXY)$/u
+@@ -116,7 +136,7 @@ function requireReadableFile(environment, name) {
+ /**
+  * Validate the packaging mode before preparation without invoking a token or Apple's services.
+  * @param {NodeJS.ProcessEnv} environment Selected local defaults or file-owned release settings.
+- * @param {{ platform: 'win32' | 'darwin', arch: string }} target Selected release target.
++ * @param {{ platform: 'win32' | 'darwin' | 'linux', arch: string }} target Selected release target.
+  * @param {{ unsigned?: boolean, prepareOnly?: boolean, skipNotarization?: boolean }} options Explicit packaging mode.
+  * @returns {void}
+  */
+@@ -126,7 +146,7 @@ export function validateDesktopPackageEnvironment(environment, target, options =
+   resolveNpmRegistry(environment)
+   if (target.platform !== 'darwin' || !options.unsigned) resolveDesktopPolicyEnvironment(environment)
+   if (target.platform === 'darwin') resolveMacOSPackageSettings(environment)
+-  else resolveWindowsPackageSettings(environment)
++  else if (target.platform === 'win32') resolveWindowsPackageSettings(environment)
+   if (options.unsigned) return
+   if (!options.prepareOnly) resolveDesktopAutoUpdateConfig(environment, target.platform, target.arch)
+   if (target.platform === 'win32') {
+@@ -137,6 +157,9 @@ export function validateDesktopPackageEnvironment(environment, target, options =
+       keyContainer: environment.DSH_DESKTOP_WINDOWS_KEY_CONTAINER,
+     })
+     if (!options.prepareOnly) resolveWindowsSignatureCacheDirectory(environment)
++  } else if (target.platform === 'linux') {
++    // Linux AppImage builds ship unsigned; COS upload credentials are validated by the upload plan.
++    return
+   } else {
+     if (environment.DSH_DESKTOP_MACOS_SIGNATURE_CACHE_DIR !== undefined) validateMacOSSignatureCacheDirectory(environment.DSH_DESKTOP_MACOS_SIGNATURE_CACHE_DIR)
+     resolveMacOSSigningEnvironment(environment)
+diff --git a/apps/desktop/scripts/desktop-publish-route.ts b/apps/desktop/scripts/desktop-publish-route.ts
+index dfd48084..b742eb7d 100644
+--- a/apps/desktop/scripts/desktop-publish-route.ts
++++ b/apps/desktop/scripts/desktop-publish-route.ts
+@@ -13,7 +13,7 @@ const requestSchema = z.object({ source: z.object({
+   repository: z.string(), runId: z.string(), attempt: z.string(), commit: z.string().regex(/^[a-f0-9]{40}$/u),
+   workflowCommit: z.string(), sourceRef: z.string().min(1),
+   channel: z.enum(['nightly', 'stable']),
+-  runnerName: z.string(), target: z.enum(['mac-arm64', 'mac-x64', 'win-x64']), preset: z.enum(['test', 'production']),
++  runnerName: z.string(), target: z.enum(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64']), preset: z.enum(['test', 'production']),
+   qualification: z.enum(['signed', 'notarized', 'unsigned', 'unnotarized']),
+ }).refine(source => source.preset === 'test' || /^(?:master|dsh-v[0-9][0-9A-Za-z.-]*)$/u.test(source.sourceRef),
+   'Production source must be master or dsh-v*') })
+@@ -28,7 +28,7 @@ export interface DesktopPublishRoute {
+   readonly channel: 'nightly' | 'stable'
+   readonly runnerName: string
+   readonly runnerLabel: string
+-  readonly target: 'mac-arm64' | 'mac-x64' | 'win-x64'
++  readonly target: 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'
+   readonly preset: 'test' | 'production'
+ }
+ 
+@@ -54,7 +54,7 @@ export function resolveDesktopPublishRoute(
+   if (run.repository.full_name !== repository || source.repository !== repository || run.path !== workflow
+     || source.runId !== String(run.id) || source.attempt !== String(run.run_attempt)
+     || source.workflowCommit !== run.head_sha
+-    || source.qualification !== (source.target === 'win-x64' ? 'signed' : 'notarized')) {
++    || source.qualification !== (source.target === 'linux-x64' ? 'unsigned' : source.target === 'win-x64' ? 'signed' : 'notarized')) {
+     throw new Error('desktop publish: request does not match the successful packaging attempt')
+   }
+   const route = routes[source.runnerName]
+diff --git a/apps/desktop/scripts/desktop-publish-targets.ts b/apps/desktop/scripts/desktop-publish-targets.ts
+index 3270b99b..9cb5f93a 100644
+--- a/apps/desktop/scripts/desktop-publish-targets.ts
++++ b/apps/desktop/scripts/desktop-publish-targets.ts
+@@ -6,9 +6,10 @@ export const desktopPackageWorkflows = {
+   'mac-arm64': '.github/workflows/macos-package.yml',
+   'mac-x64': '.github/workflows/macos-intel-package.yml',
+   'win-x64': '.github/workflows/windows-package.yml',
++  'linux-x64': '.github/workflows/linux-package.yml',
+ } as const
+ 
+-const targetSchema = z.enum(['mac-arm64', 'mac-x64', 'win-x64'])
++const targetSchema = z.enum(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ /** Machine labels are unique; a scalar target is shorthand for a one-element target list. */
+ export const desktopPublishRunnersSchema = z.record(z.string(), z.object({
+diff --git a/apps/desktop/scripts/desktop-toolchain-preflight.ts b/apps/desktop/scripts/desktop-toolchain-preflight.ts
+index ff855cfd..d1b53be9 100644
+--- a/apps/desktop/scripts/desktop-toolchain-preflight.ts
++++ b/apps/desktop/scripts/desktop-toolchain-preflight.ts
+@@ -70,12 +70,12 @@ async function probeWindowsInstallerToolchain(environment: NodeJS.ProcessEnv): P
+ 
+ /**
+  * Probe every external tool one packaging run needs.
+- * @param platform - Target platform; a Windows target already requires a Windows build host.
++ * @param platform - Target platform; a Linux target needs only archive tooling.
+  * @param environment - Packaging environment used to locate Windows tooling.
+  * @returns Every probe that failed, empty when the host can run the packaging sequence.
+  */
+ export async function probeDesktopToolchain(
+-  platform: 'darwin' | 'win32',
++  platform: 'darwin' | 'win32' | 'linux',
+   environment: NodeJS.ProcessEnv = process.env,
+ ): Promise<readonly DesktopToolchainProbeFailure[]> {
+   const failures: DesktopToolchainProbeFailure[] = []
+@@ -87,12 +87,12 @@ export async function probeDesktopToolchain(
+ 
+ /**
+  * Probe the toolchain and fail with every problem the host has.
+- * @param platform - Target platform; a Windows target already requires a Windows build host.
++ * @param platform - Target platform; Linux needs only tar, Windows also needs MSVC tooling.
+  * @param environment - Packaging environment used to locate Windows tooling.
+  * @returns Resolves when every probe passes.
+  */
+ export async function requireDesktopToolchain(
+-  platform: 'darwin' | 'win32',
++  platform: 'darwin' | 'win32' | 'linux',
+   environment: NodeJS.ProcessEnv = process.env,
+ ): Promise<void> {
+   const failures = await probeDesktopToolchain(platform, environment)
+diff --git a/apps/desktop/scripts/desktop-upload-plan.ts b/apps/desktop/scripts/desktop-upload-plan.ts
+index 39ff954b..a781ea3c 100644
+--- a/apps/desktop/scripts/desktop-upload-plan.ts
++++ b/apps/desktop/scripts/desktop-upload-plan.ts
+@@ -21,6 +21,7 @@ const TARGETS = {
+   'mac-arm64': { platform: 'darwin', arch: 'arm64', os: 'mac' },
+   'mac-x64': { platform: 'darwin', arch: 'x64', os: 'mac' },
+   'win-x64': { platform: 'win32', arch: 'x64', os: 'win' },
++  'linux-x64': { platform: 'linux', arch: 'x64', os: 'linux' },
+ } as const satisfies Record<DesktopPackageTargetName, {
+   readonly platform: NodeJS.Platform
+   readonly arch: string
+@@ -242,7 +243,7 @@ export async function createDesktopUploadPlan(
+   }
+ 
+   const base = `deepseek-harness-${buildVersion}-${target.os}-${target.arch}`
+-  const updaterExtension = target.platform === 'darwin' ? 'zip' : 'exe'
++  const updaterExtension = target.platform === 'darwin' ? 'zip' : target.platform === 'win32' ? 'exe' : 'AppImage'
+   const updaterInfo = updateFileInfo(metadata.files[0], `${metadataFilename}.files[0]`, `${base}.${updaterExtension}`)
+   const updaterPath = await verifyChecksummedArtifact(artifactsRoot, updaterInfo)
+   const artifacts: DesktopUploadArtifact[] = []
+@@ -259,7 +260,7 @@ export async function createDesktopUploadPlan(
+       uploadArtifact(blockmapPath, binaryPrefix, 'application/octet-stream'),
+     )
+   }
+-  else {
++  else if (target.platform === 'win32') {
+     const blockmapPath = await requireArtifact(artifactsRoot, `${base}.exe.blockmap`)
+     installerArtifact = uploadArtifact(
+       updaterPath,
+@@ -269,6 +270,16 @@ export async function createDesktopUploadPlan(
+     artifacts.push(installerArtifact)
+     artifacts.push(uploadArtifact(blockmapPath, binaryPrefix, 'application/octet-stream'))
+   }
++  else {
++    const blockmapPath = await requireArtifact(artifactsRoot, `${base}.AppImage.blockmap`)
++    installerArtifact = uploadArtifact(
++      updaterPath,
++      binaryPrefix,
++      'application/x-appimage',
++    )
++    artifacts.push(installerArtifact)
++    artifacts.push(uploadArtifact(blockmapPath, binaryPrefix, 'application/octet-stream'))
++  }
+ 
+   const payloadUrl = `${update.origin}/${binaryPrefix}/${updaterInfo.filename}`
+   const published = {
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index f2b76cbf..a2c615fa 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -264,7 +264,16 @@ export function createElectronBuilderConfig(
+       target: ['nsis'],
+     },
+     linux: {
++      icon: fileURLToPath(new URL('../resources/icon.png', import.meta.url)),
+       category: 'Development',
++      desktop: {
++        entry: {
++          Name: 'DeepSeek Harness',
++          Comment: 'DeepSeek Harness desktop shell',
++          Categories: 'Development;',
++          StartupWMClass: 'DeepSeek Harness',
++        },
++      },
+       target: ['AppImage'],
+     },
+     nsis: {
+diff --git a/apps/desktop/scripts/package-target.ts b/apps/desktop/scripts/package-target.ts
+index b6bc6efb..7fe34f11 100644
+--- a/apps/desktop/scripts/package-target.ts
++++ b/apps/desktop/scripts/package-target.ts
+@@ -10,7 +10,7 @@ import {
+ } from './desktop-auto-update-environment.mjs'
+ import { desktopArtifactOutput, desktopTargetBuildPaths } from './desktop-build-paths.mjs'
+ import { packageMacOSArtifacts, type DesktopPrepackagedArtifact } from './package-macos.ts'
+-import { loadDesktopPackageEnvironment, localMacOSPackageEnvironment, validateDesktopPackageEnvironment } from './desktop-package-environment.mjs'
++import { loadDesktopPackageEnvironment, localLinuxPackageEnvironment, localMacOSPackageEnvironment, validateDesktopPackageEnvironment } from './desktop-package-environment.mjs'
+ import { createPackagingRun, recordPackagingEvent } from './packaging-run.mjs'
+ import { withWindowsSigningStage } from './windows-signing-stage.mjs'
+ import { prepareWindowsSignatureCacheDirectory, resolveWindowsSignatureCacheDirectory } from './windows-signature-cache-directory.mjs'
+@@ -48,14 +48,14 @@ const DESKTOP_UPLOAD_CREDENTIAL_ENV_NAMES = new Set([
+ const AUTOMATIC_BUILD_VERSION = 'auto'
+ 
+ /** Fixed platform and architecture identifiers exposed by package scripts. */
+-export type DesktopPackageTargetName = 'mac-arm64' | 'mac-x64' | 'win-x64'
++export type DesktopPackageTargetName = 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'
+ 
+ /** One supported release target and its electron-builder selectors. */
+ export interface DesktopPackageTarget {
+   readonly name: DesktopPackageTargetName
+-  readonly platform: 'darwin' | 'win32'
++  readonly platform: 'darwin' | 'win32' | 'linux'
+   readonly arch: 'arm64' | 'x64'
+-  readonly builderPlatform: '--mac' | '--win'
++  readonly builderPlatform: '--mac' | '--win' | '--linux'
+   readonly builderArch: '--arm64' | '--x64'
+ }
+ 
+@@ -81,6 +81,13 @@ const TARGETS: Record<DesktopPackageTargetName, DesktopPackageTarget> = {
+     builderPlatform: '--win',
+     builderArch: '--x64',
+   },
++  'linux-x64': {
++    name: 'linux-x64',
++    platform: 'linux',
++    arch: 'x64',
++    builderPlatform: '--linux',
++    builderArch: '--x64',
++  },
+ }
+ 
+ /**
+@@ -184,6 +191,9 @@ export function resolveDesktopPackageTarget(
+   if (target.platform === 'darwin' && hostPlatform !== 'darwin') {
+     throw new Error(`desktop package: ${name} requires a macOS build host`)
+   }
++  if (target.platform === 'linux' && (hostPlatform !== 'linux' || hostArch !== 'x64')) {
++    throw new Error('desktop package: linux-x64 requires a Linux x64 build host')
++  }
+   if (name === 'mac-arm64' && hostArch !== 'arm64') {
+     throw new Error('desktop package: mac-arm64 requires an Apple Silicon build host')
+   }
+@@ -205,7 +215,8 @@ interface DesktopPackageInvocation {
+ }
+ 
+ function hostTargetName(platform: NodeJS.Platform, arch: string): DesktopPackageTargetName {
+-  const name = `${platform === 'darwin' ? 'mac' : platform === 'win32' ? 'win' : platform}-${arch}`
++  const os = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'win' : platform
++  const name = `${os}-${arch}`
+   if (!isTargetName(name)) throw new Error(`desktop package: unsupported build host ${platform}-${arch}`)
+   return name
+ }
+@@ -344,8 +355,12 @@ async function main(): Promise<void> {
+   if (invocation.skipNotarization) {
+     process.stdout.write('desktop package: skipping notarization and stapling; internal debugging only, not qualified for distribution or update publishing\n')
+   }
+-  const environment = target.platform === 'darwin' && invocation.unsigned
+-    ? localMacOSPackageEnvironment()
++  const environment = invocation.unsigned
++    ? target.platform === 'darwin' ? localMacOSPackageEnvironment()
++      : target.platform === 'linux' ? localLinuxPackageEnvironment()
++        : loadDesktopPackageEnvironment(target.platform, process.env, APP_ROOT, {
++          unsigned: invocation.unsigned, prepareOnly: invocation.prepareOnly,
++        })
+     : loadDesktopPackageEnvironment(target.platform, process.env, APP_ROOT, {
+       unsigned: invocation.unsigned, prepareOnly: invocation.prepareOnly,
+     })
+diff --git a/apps/desktop/scripts/upload-target.ts b/apps/desktop/scripts/upload-target.ts
+index a1afdb32..22b11924 100644
+--- a/apps/desktop/scripts/upload-target.ts
++++ b/apps/desktop/scripts/upload-target.ts
+@@ -12,7 +12,7 @@ import { desktopReleaseTag, tagDesktopRelease } from './desktop-release-tag.ts'
+ import { uploadDesktopRelease } from './desktop-upload-run.ts'
+ import { DesktopPurgeError, purgeDesktopInstaller, resolveDesktopPurgeConfig } from './desktop-edgeone.ts'
+ 
+-const SUPPORTED_TARGETS = new Set<DesktopPackageTargetName>(['mac-arm64', 'mac-x64', 'win-x64'])
++const SUPPORTED_TARGETS = new Set<DesktopPackageTargetName>(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ function targetName(value: string): DesktopPackageTargetName {
+   if (!SUPPORTED_TARGETS.has(value as DesktopPackageTargetName)) {
+@@ -163,7 +163,7 @@ export async function runDesktopUploadCommand(args: string[]): Promise<void> {
+     const usage = error instanceof DesktopUploadUsageError
+       || (error instanceof Error && 'code' in error && typeof error.code === 'string' && error.code.startsWith('ERR_PARSE_ARGS_'))
+     const message = error instanceof DesktopPurgeError ? error.message
+-      : usage ? `desktop upload/purge: ${error instanceof DesktopUploadUsageError ? error.message : 'invalid arguments'}. Usage: upload-target.ts <target> [--latest [--purge-only]]; targets: mac-arm64, mac-x64, win-x64.`
++      : usage ? `desktop upload/purge: ${error instanceof DesktopUploadUsageError ? error.message : 'invalid arguments'}. Usage: upload-target.ts <target> [--latest [--purge-only]]; targets: mac-arm64, mac-x64, win-x64, linux-x64.`
+         : 'desktop upload: failed; inspect the printed record directory if allocated. No automatic retry; reconcile remote state before another upload.'
+     // The DPAPI launcher suppresses raw stderr; these diagnostics contain no SDK details.
+     const output = args.includes('--credential-launcher') ? process.stdout : process.stderr
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+index f0034b46..53b90938 100644
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -43,6 +43,8 @@ export const DESKTOP_IPC = {
+   updatesPresentation: 'dsh-desktop:updates-presentation',
+   updatesFeedGet: 'dsh-desktop:updates-feed-get',
+   updatesFeedSet: 'dsh-desktop:updates-feed-set',
++  openAtLoginGet: 'dsh-desktop:open-at-login-get',
++  openAtLoginSet: 'dsh-desktop:open-at-login-set',
+   nativeThemeSet: 'dsh-desktop:native-theme-set',
+   windowFullscreen: 'dsh-desktop:window-fullscreen',
+   windowsAppearance: 'dsh-desktop:windows-appearance',
+@@ -112,6 +114,10 @@ export interface DshDesktopProductApi {
+     open(): Promise<void>
+     subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
+   }
++  readonly openAtLogin: {
++    get(): Promise<boolean>
++    set(enabled: boolean): Promise<{ success: boolean; error?: string }>
++  }
+ }
+ 
+ /** Scheme of Desktop-owned application documents. */
+diff --git a/apps/desktop/src/linuxAutostart.ts b/apps/desktop/src/linuxAutostart.ts
+new file mode 100644
+index 00000000..76d6298a
+--- /dev/null
++++ b/apps/desktop/src/linuxAutostart.ts
+@@ -0,0 +1,108 @@
++/** XDG autostart entry manager for Linux open-at-login. */
++
++import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
++import { homedir } from 'node:os'
++import { join } from 'node:path'
++
++/** Desktop entry filename registered under ~/.config/autostart. */
++export const LINUX_AUTOSTART_FILENAME = 'deepseek-harness.desktop'
++
++/** Injectable environment and platform for tests. */
++export interface LinuxAutostartEnv {
++  readonly XDG_CONFIG_HOME?: string
++  readonly HOME?: string
++  readonly APPIMAGE?: string
++  readonly platform?: NodeJS.Platform
++  readonly argv0?: string
++}
++
++function configHome(env: LinuxAutostartEnv): string {
++  if (env.XDG_CONFIG_HOME !== undefined && env.XDG_CONFIG_HOME !== '') return env.XDG_CONFIG_HOME
++  const home = env.HOME ?? homedir()
++  return join(home, '.config')
++}
++
++/**
++ * Resolve the autostart entry path.
++ * @param env - Injectable environment for tests.
++ * @returns Autostart desktop-entry path.
++ */
++export function linuxAutostartFilePath(env: LinuxAutostartEnv = {}): string {
++  return join(configHome(env), 'autostart', LINUX_AUTOSTART_FILENAME)
++}
++
++function quotedExec(command: string): string {
++  return /[\s"\\]/u.test(command) ? `"${command.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"` : command
++}
++
++/**
++ * Prefer the FUSE-mounted AppImage path so the entry survives extraction moves.
++ * @param env - Injectable environment for tests.
++ * @returns Launch path for the Exec line.
++ */
++export function resolveLaunchPath(env: LinuxAutostartEnv = {}): string {
++  const appImage = env.APPIMAGE ?? process.env.APPIMAGE
++  if (appImage !== undefined && appImage !== '') return appImage
++  return env.argv0 ?? process.argv[0] ?? process.execPath
++}
++
++/**
++ * Build the XDG desktop entry; no % field codes so the shell never interprets them.
++ * @param execPath - Launch path.
++ * @param enabled - Whether autostart is enabled.
++ * @returns Desktop-entry contents.
++ */
++export function buildLinuxAutostartEntry(execPath: string, enabled: boolean): string {
++  return [
++    '[Desktop Entry]',
++    'Type=Application',
++    'Name=DeepSeek Harness',
++    'Comment=DeepSeek Harness desktop shell',
++    `Exec=${quotedExec(execPath)}`,
++    'Terminal=false',
++    'Categories=Development;',
++    'StartupWMClass=DeepSeek Harness',
++    `Hidden=${enabled ? 'false' : 'true'}`,
++    'X-GNOME-Autostart-enabled=false',
++    '',
++  ].join('\n')
++}
++
++/**
++ * Write the autostart entry; fail-closed on non-Linux platforms.
++ * @param enabled - Whether to enable open-at-login.
++ * @param env - Injectable environment and platform for tests.
++ * @returns Success flag.
++ */
++export function setLinuxOpenAtLogin(enabled: boolean, env: LinuxAutostartEnv = {}): boolean {
++  try {
++    const platform = env.platform ?? process.platform
++    if (platform !== 'linux') return false
++    const path = linuxAutostartFilePath(env)
++    mkdirSync(join(path, '..'), { recursive: true, mode: 0o700 })
++    writeFileSync(path, buildLinuxAutostartEntry(resolveLaunchPath(env), enabled), { mode: 0o600 })
++    return true
++  } catch {
++    return false
++  }
++}
++
++/**
++ * Read the autostart entry; missing files and parse failures read as disabled.
++ * @param env - Injectable environment and platform for tests.
++ * @returns Whether open-at-login is enabled.
++ */
++export function getLinuxOpenAtLogin(env: LinuxAutostartEnv = {}): boolean {
++  try {
++    const platform = env.platform ?? process.platform
++    if (platform !== 'linux') return false
++    const path = linuxAutostartFilePath(env)
++    if (!existsSync(path)) return false
++    const contents = readFileSync(path, 'utf8')
++    if (/^Hidden\s*=\s*true\s*$/gimu.test(contents)) return false
++    if (!/^Exec\s*=/gimu.test(contents)) return false
++    return true
++  } catch {
++    return false
++  }
++}
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 4030a86d..2194f677 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -8,6 +8,7 @@ import { isDesktopUpdateChannel } from './settings-file.ts'
+ import type { ProductEventMap, ProductEvent } from '@deepseek-ai/dsh-client-product-analytics/types'
+ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ import { access, readFile, writeFile } from 'node:fs/promises'
++import { getLinuxOpenAtLogin, setLinuxOpenAtLogin } from './linuxAutostart.ts'
+ import { join } from 'node:path'
+ import { fileURLToPath } from 'node:url'
+ import { readFileSync, writeFileSync } from 'node:fs'
+@@ -977,6 +978,25 @@ async function main(): Promise<void> {
+     void updates.check(true).catch((error: unknown) => { console.error('desktop update: feed check failed', error) })
+     return { kind: 'applied', state, releases: checked.releases, message: checked.message }
+   })
++  ipcMain.handle(DESKTOP_IPC.openAtLoginGet, () => {
++    try {
++      if (process.platform !== 'linux') return false
++      return getLinuxOpenAtLogin()
++    } catch {
++      return false
++    }
++  })
++  ipcMain.handle(DESKTOP_IPC.openAtLoginSet, async (event, enabled: unknown): Promise<{ success: boolean; error?: string }> => {
++    assertProductSender(event)
++    try {
++      if (process.platform !== 'linux') return { success: false, error: 'unsupported platform' }
++      if (typeof enabled !== 'boolean') return { success: false, error: 'invalid value' }
++      const ok = setLinuxOpenAtLogin(enabled)
++      return ok ? { success: true } : { success: false, error: 'write failed' }
++    } catch (error) {
++      return { success: false, error: error instanceof Error ? error.message : 'write failed' }
++    }
++  })
+   ipcMain.handle(DESKTOP_IPC.deviceInfo, (event) => {
+     assertProductSender(event)
+     return readDeviceInfo()
+@@ -1596,10 +1616,10 @@ async function main(): Promise<void> {
+         () => mandatoryUI?.confirmationWindow ?? currentDialogWindow(),
+         (event) => { console.info(`desktop policy authentication: ${event}`); updateJournal?.action(`policy-login-${event}`) })
+     }
+-    if (!['win32', 'darwin'].includes(process.platform) || !['x64', 'arm64'].includes(process.arch)) throw new Error('desktop policy: unsupported platform')
++    if (!['win32', 'darwin', 'linux'].includes(process.platform) || !['x64', 'arm64'].includes(process.arch)) throw new Error('desktop policy: unsupported platform')
+     let wasBlocking = false
+     mandatoryPolicy = new DesktopMandatoryUpdatePolicy(policyConfig, {
+-      platform: process.platform as 'win32' | 'darwin', arch: process.arch as 'x64' | 'arm64',
++      platform: process.platform as 'win32' | 'darwin' | 'linux', arch: process.arch as 'x64' | 'arm64',
+       get channel() { return updates.selectedChannel },
+       bundledDshVersion: app.isPackaged ? readDesktopRuntime(resources.dsh).release.version : app.getVersion(),
+     }, (state) => {
+@@ -1641,7 +1661,12 @@ async function main(): Promise<void> {
+ 
+ const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
+ 
+-if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
++// Keep default userData path pinned first; changing app.name moves the
++// profile directory, so the Linux display name is set only after whenReady.
++if (ownsDesktopInstance) void app.whenReady().then(async () => {
++  if (process.platform === 'linux' && typeof app.setName === 'function') app.setName('DeepSeek Harness')
++  await main()
++}).catch(async (error: unknown) => {
+   const message = error instanceof Error ? error.message : String(error)
+   console.error(error)
+   const diagnosticFile = process.env.DSH_DESKTOP_DIAGNOSTIC_FILE
+diff --git a/apps/desktop/src/mandatory-update-policy.ts b/apps/desktop/src/mandatory-update-policy.ts
+index 44777281..4ae99006 100644
+--- a/apps/desktop/src/mandatory-update-policy.ts
++++ b/apps/desktop/src/mandatory-update-policy.ts
+@@ -6,7 +6,7 @@ import { platformClientHeaders } from '@deepseek-ai/dsh-deepseek-account/client-
+ 
+ /** Installed release identity; no field is supplied by a renderer. */
+ export interface DesktopPolicyIdentity {
+-  readonly platform: 'win32' | 'darwin'
++  readonly platform: 'win32' | 'darwin' | 'linux'
+   readonly bundledDshVersion: string
+   readonly arch: 'x64' | 'arm64'
+   readonly channel: 'nightly' | 'stable'
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+index 5aaf8d75..70850d08 100644
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -88,6 +88,10 @@ function createProductApi(): DshDesktopProductApi {
+         return () => { ipcRenderer.off(DESKTOP_IPC.updatesPresentation, handle) }
+       },
+     },
++    openAtLogin: {
++      get: () => ipcRenderer.invoke(DESKTOP_IPC.openAtLoginGet) as Promise<boolean>,
++      set: (enabled: boolean) => ipcRenderer.invoke(DESKTOP_IPC.openAtLoginSet, enabled) as Promise<{ success: boolean; error?: string }>,
++    },
+   }
+ }
+ 
+diff --git a/apps/desktop/tests/desktop-auto-update-environment.spec.ts b/apps/desktop/tests/desktop-auto-update-environment.spec.ts
+index 74fabee9..c95b1ec7 100644
+--- a/apps/desktop/tests/desktop-auto-update-environment.spec.ts
++++ b/apps/desktop/tests/desktop-auto-update-environment.spec.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, it } from 'vitest'
+ import {
+   desktopBuildRecordFilename,
++  desktopLatestInstallerFilename,
+   desktopWebsiteInstallerUrl,
+   desktopUpdateMetadataFilename,
+   resolveDesktopAutoUpdateConfig,
+@@ -104,20 +105,24 @@ describe('desktop auto-update environment', () => {
+     }, 'darwin', 'arm64')).toThrow(/HTTPS origin/u)
+   })
+ 
+-  it('rejects unknown deployments and targets', () => {
++  it('rejects unknown deployments and unsupported architectures', () => {
+     expect(() => resolveDesktopAutoUpdateEnvironment({
+       DSH_DESKTOP_AUTO_UPDATE_ENV: 'staging',
+     })).toThrow(/test.*production/u)
+-    expect(() => resolveDesktopAutoUpdateTarget('linux', 'x64')).toThrow(/unsupported target/u)
+-    expect(() => desktopBuildRecordFilename('linux-x64' as 'mac-arm64')).toThrow(/unsupported target/u)
++    expect(() => resolveDesktopAutoUpdateTarget('linux', 'arm64')).toThrow(/unsupported target/u)
++    expect(() => desktopBuildRecordFilename('linux-arm64' as 'mac-arm64')).toThrow(/unsupported target/u)
++    expect(resolveDesktopAutoUpdateTarget('linux', 'x64')).toBe('linux-x64')
++    expect(desktopBuildRecordFilename('linux-x64')).toBe('linux-x64-release.json')
++    expect(desktopLatestInstallerFilename('linux-x64')).toBe('dsh-latest-linux-x64.AppImage')
+   })
+ 
+   it('uses Nightly metadata for stable and prerelease Desktop versions', () => {
+     expect(desktopUpdateMetadataFilename('1.2.3', 'darwin')).toBe('nightly-mac.yml')
+     expect(desktopUpdateMetadataFilename('1.2.3-alpha.4', 'darwin')).toBe('nightly-mac.yml')
+     expect(desktopUpdateMetadataFilename('1.2.3-beta.2', 'win32')).toBe('nightly.yml')
++    expect(desktopUpdateMetadataFilename('1.2.3', 'linux')).toBe('nightly-linux.yml')
+     expect(() => desktopUpdateMetadataFilename('not-semver', 'darwin')).toThrow(/invalid Desktop version/u)
+-    expect(() => desktopUpdateMetadataFilename('1.2.3', 'linux')).toThrow(/unsupported metadata platform/u)
++    expect(() => desktopUpdateMetadataFilename('1.2.3', 'freebsd' as NodeJS.Platform)).toThrow(/unsupported metadata platform/u)
+   })
+ })
+ 
+diff --git a/apps/desktop/tests/desktop-build-paths.spec.ts b/apps/desktop/tests/desktop-build-paths.spec.ts
+index f9891ebb..a69e3707 100644
+--- a/apps/desktop/tests/desktop-build-paths.spec.ts
++++ b/apps/desktop/tests/desktop-build-paths.spec.ts
+@@ -79,7 +79,8 @@ describe('desktop build paths', () => {
+     expect(desktopTargetPlatform('mac-arm64')).toEqual({ platform: 'darwin', arch: 'arm64' })
+     expect(desktopTargetPlatform('mac-x64')).toEqual({ platform: 'darwin', arch: 'x64' })
+     expect(desktopTargetPlatform('win-x64')).toEqual({ platform: 'win32', arch: 'x64' })
+-    expect(() => desktopTargetPlatform('linux-x64' as 'mac-x64')).toThrow(/unsupported target/u)
++    expect(desktopTargetPlatform('linux-x64')).toEqual({ platform: 'linux', arch: 'x64' })
++    expect(() => desktopTargetPlatform('linux-arm64' as 'mac-x64')).toThrow(/unsupported target/u)
+   })
+ 
+   it('resolves environment overrides and rejects unsupported targets', () => {
+@@ -88,7 +89,9 @@ describe('desktop build paths', () => {
+       DSH_DESKTOP_TARGET_ARCH: 'x64',
+     }, 'darwin', 'arm64')).toBe('mac-x64')
+     expect(resolveDesktopBuildTarget({}, 'win32', 'x64')).toBe('win-x64')
+-    expect(() => resolveDesktopBuildTarget({}, 'linux', 'x64')).toThrow(/unsupported target/u)
+-    expect(() => desktopTargetBuildPaths('linux-x64' as 'mac-x64')).toThrow(/unsupported target/u)
++    expect(resolveDesktopBuildTarget({}, 'linux', 'x64')).toBe('linux-x64')
++    expect(() => resolveDesktopBuildTarget({}, 'linux', 'arm64')).toThrow(/unsupported target/u)
++    expect(() => desktopTargetPlatform('linux-arm64' as 'mac-x64')).toThrow(/unsupported target/u)
++    expect(() => desktopTargetBuildPaths('linux-arm64' as 'mac-x64')).toThrow(/unsupported target/u)
+   })
+ })
+diff --git a/apps/desktop/tests/desktop-package-selection.spec.ts b/apps/desktop/tests/desktop-package-selection.spec.ts
+index 54d2aaec..2a04b60b 100644
+--- a/apps/desktop/tests/desktop-package-selection.spec.ts
++++ b/apps/desktop/tests/desktop-package-selection.spec.ts
+@@ -132,9 +132,15 @@ it('routes both Mac architectures to one machine without authorizing an unlisted
+       .toMatchObject({ runnerName: 'mini', runnerLabel: 'dsh-mini' })
+   }
+   expect(() => selectDesktopPackage('owner/repo', { package_run_id: '42' }, f.routes, f.api)).toThrow(/no configured/u)
+-  for (const target of [[], ['mac-x64', 'linux-x64']]) {
++  for (const target of [[], ['mac-x64', 'linux-arm64']]) {
+     expect(() => selectDesktopPackage('owner/repo', { package_run_id: '42' }, { mini: { label: 'dsh-mini', target } }, f.api)).toThrow()
+   }
++  // linux-x64 is a configured publishing route (linux-package.yml): a
++  // single-target route resolves instead of throwing.
++  f.run.path = '.github/workflows/linux-package.yml'
++  expect(
++    selectDesktopPackage('owner/repo', { package_run_id: '42' }, { mini: { label: 'dsh-mini', target: ['linux-x64'] } }, f.api),
++  ).toMatchObject({ runnerName: 'mini', runnerLabel: 'dsh-mini' })
+ })
+ 
+ it.each([false, true])('keeps original build after archival retry with reused job listed: %s', (includesReused) => {
+diff --git a/apps/desktop/tests/electron-builder-config-linux.spec.ts b/apps/desktop/tests/electron-builder-config-linux.spec.ts
+new file mode 100644
+index 00000000..35452e90
+--- /dev/null
++++ b/apps/desktop/tests/electron-builder-config-linux.spec.ts
+@@ -0,0 +1,25 @@
++import { describe, expect, it, vi } from 'vitest'
++
++vi.mock('node:child_process', async (importOriginal) => {
++  const original = await importOriginal<typeof import('node:child_process')>()
++  return { ...original, execFile: Object.assign(vi.fn(), {}) }
++})
++
++describe('electron-builder linux config', () => {
++  it('targets AppImage with the dock-matching desktop entry', async () => {
++    const { createElectronBuilderConfig } = await import('../scripts/electron-builder-config.mjs')
++    const config = createElectronBuilderConfig({
++      DSH_DESKTOP_APP_ID: 'com.example.installer',
++      DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.com',
++      DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: JSON.stringify({ allowedAuthOrigins: ['https://login.example.com'] }),
++      DSH_DESKTOP_TARGET_PLATFORM: 'linux',
++      DSH_DESKTOP_TARGET_ARCH: 'x64',
++      DSH_DESKTOP_UNSIGNED: '1',
++      DOWNLOAD_TEST_ORIGIN: 'https://desktop-updates.example.com',
++      DOWNLOAD_TEST_RELEASE_ID: '0123456789abcdef0123456789abcdef',
++    }, 'linux', 'x64')
++    expect(config.linux.target).toContain('AppImage')
++    expect(config.linux.desktop.entry.StartupWMClass).toBe('DeepSeek Harness')
++    expect(config.linux.desktop.entry.Name).toBe('DeepSeek Harness')
++  })
++})
+diff --git a/apps/desktop/tests/linux-autostart.spec.ts b/apps/desktop/tests/linux-autostart.spec.ts
+new file mode 100644
+index 00000000..e316f382
+--- /dev/null
++++ b/apps/desktop/tests/linux-autostart.spec.ts
+@@ -0,0 +1,72 @@
++import { mkdtemp, readFile, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterEach, describe, expect, it } from 'vitest'
++import {
++  buildLinuxAutostartEntry,
++  getLinuxOpenAtLogin,
++  linuxAutostartFilePath,
++  LINUX_AUTOSTART_FILENAME,
++  resolveLaunchPath,
++  setLinuxOpenAtLogin,
++} from '../src/linuxAutostart.ts'
++
++const LINUX = { platform: 'linux' } as const
++let directories: string[] = []
++
++async function configHome(): Promise<string> {
++  const directory = await mkdtemp(join(tmpdir(), 'dsh-autostart-'))
++  directories.push(directory)
++  return directory
++}
++
++afterEach(async () => {
++  for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true })
++})
++
++describe('linux autostart', () => {
++  it('writes, reads, and disables a round-trip entry', async () => {
++    const XDG_CONFIG_HOME = await configHome()
++    const env = { ...LINUX, XDG_CONFIG_HOME, argv0: '/opt/dsh/dsh' }
++    expect(getLinuxOpenAtLogin(env)).toBe(false)
++    expect(setLinuxOpenAtLogin(true, env)).toBe(true)
++    expect(getLinuxOpenAtLogin(env)).toBe(true)
++    expect(setLinuxOpenAtLogin(false, env)).toBe(true)
++    expect(getLinuxOpenAtLogin(env)).toBe(false)
++    const path = linuxAutostartFilePath(env)
++    expect(path).toBe(join(XDG_CONFIG_HOME, 'autostart', LINUX_AUTOSTART_FILENAME))
++    expect(await readFile(path, 'utf8')).toContain('Hidden=true')
++  })
++
++  it('quotes paths with spaces and never emits field codes', async () => {
++    const XDG_CONFIG_HOME = await configHome()
++    const env = { ...LINUX, XDG_CONFIG_HOME, argv0: '/opt/my apps/dsh "special"' }
++    expect(setLinuxOpenAtLogin(true, env)).toBe(true)
++    const contents = await readFile(linuxAutostartFilePath(env), 'utf8')
++    expect(contents).toMatch(/^Exec="/gmu)
++    expect(contents).not.toMatch(/ %[a-z]/gimu)
++    expect(contents).toContain('StartupWMClass=DeepSeek Harness')
++  })
++
++  it('prefers the FUSE AppImage path', () => {
++    expect(resolveLaunchPath({ ...LINUX, APPIMAGE: '/tmp/.mount_dshXYZ/AppRun', argv0: '/other' }))
++      .toBe('/tmp/.mount_dshXYZ/AppRun')
++    expect(resolveLaunchPath({ ...LINUX, argv0: '/opt/dsh' })).toBe('/opt/dsh')
++  })
++
++  it('reads missing files as disabled', async () => {
++    const XDG_CONFIG_HOME = await configHome()
++    expect(getLinuxOpenAtLogin({ ...LINUX, XDG_CONFIG_HOME })).toBe(false)
++  })
++
++  it('treats Hidden=true as off', () => {
++    expect(buildLinuxAutostartEntry('/opt/dsh', false)).toContain('Hidden=true')
++    expect(buildLinuxAutostartEntry('/opt/dsh', true)).toContain('Hidden=false')
++  })
++
++  it('fails closed on other platforms without throwing', async () => {
++    const XDG_CONFIG_HOME = await configHome()
++    expect(setLinuxOpenAtLogin(true, { platform: 'darwin', XDG_CONFIG_HOME })).toBe(false)
++    expect(getLinuxOpenAtLogin({ platform: 'darwin', XDG_CONFIG_HOME })).toBe(false)
++  })
++})
+diff --git a/apps/desktop/tests/linux-dock-association.spec.ts b/apps/desktop/tests/linux-dock-association.spec.ts
+new file mode 100644
+index 00000000..a21ee020
+--- /dev/null
++++ b/apps/desktop/tests/linux-dock-association.spec.ts
+@@ -0,0 +1,21 @@
++import { readFile } from 'node:fs/promises'
++import { join } from 'node:path'
++import { describe, expect, it } from 'vitest'
++
++const APP_ROOT = join(import.meta.dirname, '..')
++
++describe('linux dock association', () => {
++  it('gates app.setName on linux after whenReady', async () => {
++    const main = await readFile(join(APP_ROOT, 'src/main.ts'), 'utf8')
++    expect(main).toMatch(/process\.platform === 'linux'.*app\.setName\('DeepSeek Harness'\)/s)
++  })
++
++  it('matches builder StartupWMClass to the setName string and entry Name', async () => {
++    const main = await readFile(join(APP_ROOT, 'src/main.ts'), 'utf8')
++    const config = await readFile(join(APP_ROOT, 'scripts/electron-builder-config.mjs'), 'utf8')
++    const setName = main.match(/app\.setName\('([^']+)'\)/)?.[1]
++    expect(setName).toBe('DeepSeek Harness')
++    expect(config).toContain(`StartupWMClass: '${setName}'`)
++    expect(config).toContain(`Name: '${setName}'`)
++  })
++})
+diff --git a/apps/desktop/tests/package-target.spec.ts b/apps/desktop/tests/package-target.spec.ts
+index ba647d76..0fb60743 100644
+--- a/apps/desktop/tests/package-target.spec.ts
++++ b/apps/desktop/tests/package-target.spec.ts
+@@ -19,6 +19,9 @@ describe('desktop package target', () => {
+     expect(resolveDesktopPackageTarget('win-x64', 'win32', 'x64')).toMatchObject({
+       platform: 'win32', arch: 'x64', builderPlatform: '--win', builderArch: '--x64',
+     })
++    expect(resolveDesktopPackageTarget('linux-x64', 'linux', 'x64')).toMatchObject({
++      platform: 'linux', arch: 'x64', builderPlatform: '--linux', builderArch: '--x64',
++    })
+   })
+ 
+   it('allows an Apple Silicon host to build the Intel target through Rosetta', () => {
+@@ -26,7 +29,8 @@ describe('desktop package target', () => {
+   })
+ 
+   it('rejects unsupported targets and hosts before building', () => {
+-    expect(() => resolveDesktopPackageTarget('linux-x64', 'linux', 'x64')).toThrow(/unsupported target/u)
++    expect(() => resolveDesktopPackageTarget('linux-arm64', 'linux', 'x64')).toThrow(/unsupported target/u)
++    expect(() => resolveDesktopPackageTarget('linux-x64', 'darwin', 'x64')).toThrow(/Linux x64/u)
+     expect(() => resolveDesktopPackageTarget('win-x64', 'darwin', 'arm64')).toThrow(/Windows x64/u)
+     expect(() => resolveDesktopPackageTarget('mac-arm64', 'darwin', 'x64')).toThrow(/Apple Silicon/u)
+     expect(() => resolveDesktopPackageTarget('mac-arm64', 'linux', 'arm64')).toThrow(/macOS/u)
+diff --git a/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx b/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
+index d29996bd..35585bf1 100644
+--- a/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
++++ b/packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx
+@@ -17,17 +17,22 @@ export interface DesktopFeedRowInjected {
+  * owner and pressing Check validates the catalog, persists the owner,
+  * repoints the live updater feed, and checks immediately. Nothing
+  * persists on failure; upstream has no `.forkhub` repo so it can never
+- * validate as a publisher.
++ * validate as a publisher. A third-party catalog shows its maintainer link.
+  */
+ export function DesktopFeedRow({ useFeed, edit, check, dismiss, t }:
+   PropsRuntime<'settings.general.item'> & PropsLocale<'settings'> & InjectFace<DesktopFeedRowInjected>) {
+   const { state, failed, input, checking, notice } = useFeed(value => value)
+   const busy = checking
++  const owner = state?.owner ?? ''
++  const thirdParty = owner !== '' && owner !== 'with-fh' && owner !== 'deepseek-ai'
+   return <div className={css.row} role="group" aria-label={t('desktop.feed.title')}>
+     <div className={css.rowText}>
+       <div className={css.title}>{t('desktop.feed.title')}</div>
+       <div className={css.description}>{t('desktop.feed.description')}</div>
+       {(failed || state === undefined) && <div role="alert">{t('desktop.feed.unavailable')}</div>}
++      {thirdParty && <div>{t('desktop.feed.maintainedBy', { owner })}
++        <a href={`https://github.com/${owner}/.forkhub`} target="_blank" rel="noreferrer">https://github.com/{owner}/.forkhub</a>
++      </div>}
+       {notice !== undefined && <div role={notice.tone === 'error' ? 'alert' : 'status'}>
+         {notice.text}
+         <button type="button" onClick={() => { dismiss(notice.sequence) }} aria-label={t('desktop.feed.dismiss')}>
+diff --git a/packages/client/ui-settings-general/src/client/locales.ts b/packages/client/ui-settings-general/src/client/locales.ts
+index 451a0ec5..76d109ca 100644
+--- a/packages/client/ui-settings-general/src/client/locales.ts
++++ b/packages/client/ui-settings-general/src/client/locales.ts
+@@ -73,6 +73,7 @@ export const zh = {
+   'desktop.feed.current': '当前更新源：{owner}/.forkhub',
+   'desktop.feed.unavailable': '无法读取更新源请重启应用。',
+   'desktop.feed.dismiss': '关闭',
++  'desktop.feed.maintainedBy': '由 {owner} 维护',
+ } satisfies Record<string, string>
+ 
+ /** The settings namespace key union. */
+@@ -151,6 +152,7 @@ export const en = {
+   'desktop.feed.current': 'Current feed: {owner}/.forkhub',
+   'desktop.feed.unavailable': 'Could not read the update feed. Restart the app.',
+   'desktop.feed.dismiss': 'Dismiss',
++  'desktop.feed.maintainedBy': 'Maintained by {owner}',
+ } satisfies Record<SettingsKey, string>
+ 
+ /** Japanese copy, checked against the English keys. */
+@@ -226,6 +228,7 @@ export const ja = {
+   'desktop.feed.current': '現在のフィード: {owner}/.forkhub',
+   'desktop.feed.unavailable': '更新フィードを読み取れません。アプリを再起動してください。',
+   'desktop.feed.dismiss': '閉じる',
++  'desktop.feed.maintainedBy': '{owner} がメンテナンス',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** Spanish dictionary, checked against the English keys. */
+@@ -301,6 +304,7 @@ export const es = {
+   'desktop.feed.current': 'Feed actual: {owner}/.forkhub',
+   'desktop.feed.unavailable': 'No se pudo leer el feed de actualizaciones. Reinicia la app.',
+   'desktop.feed.dismiss': 'Descartar',
++  'desktop.feed.maintainedBy': 'Mantenido por {owner}',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** French dictionary, checked against the English keys. */
+@@ -376,6 +380,7 @@ export const fr = {
+   'desktop.feed.current': 'Flux actuel : {owner}/.forkhub',
+   'desktop.feed.unavailable': 'Impossible de lire le flux de mise à jour. Redémarrez l’app.',
+   'desktop.feed.dismiss': 'Ignorer',
++  'desktop.feed.maintainedBy': 'Maintenu par {owner}',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** German dictionary, checked against the English keys. */
+@@ -451,6 +456,7 @@ export const de = {
+   'desktop.feed.current': 'Aktueller Feed: {owner}/.forkhub',
+   'desktop.feed.unavailable': 'Update-Feed konnte nicht gelesen werden. Starte die App neu.',
+   'desktop.feed.dismiss': 'Schließen',
++  'desktop.feed.maintainedBy': 'Gepflegt von {owner}',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** Russian dictionary, checked against the English keys. */
+@@ -526,6 +532,7 @@ export const ru = {
+   'desktop.feed.current': 'Текущая лента: {owner}/.forkhub',
+   'desktop.feed.unavailable': 'Не удалось прочитать ленту обновлений. Перезапустите приложение.',
+   'desktop.feed.dismiss': 'Закрыть',
++  'desktop.feed.maintainedBy': 'Поддерживается {owner}',
+ } satisfies Record<keyof typeof en, string>
+ 
+ /** Portuguese dictionary, checked against the English keys. */
+@@ -601,4 +608,5 @@ export const pt = {
+   'desktop.feed.current': 'Feed atual: {owner}/.forkhub',
+   'desktop.feed.unavailable': 'Não foi possível ler o feed de atualização. Reinicie o app.',
+   'desktop.feed.dismiss': 'Dispensar',
++  'desktop.feed.maintainedBy': 'Mantido por {owner}',
+ } satisfies Record<keyof typeof en, string>
+-- 
+2.43.0
+
+
+From 1934b60158d50e9c617ce0d32b976be5d94b1f65 Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:16:50 +0700
+Subject: [PATCH 02/13] fix(linux): exempt linux-unsigned from mandatory policy
+ requirement (parity with darwin-unsigned local builds)
+
+---
+ .../scripts/desktop-package-environment.mjs        |  2 +-
+ .../tests/desktop-package-environment.spec.ts      | 14 +++++++++++++-
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/scripts/desktop-package-environment.mjs b/apps/desktop/scripts/desktop-package-environment.mjs
+index 41282a4b..9d72c5ee 100644
+--- a/apps/desktop/scripts/desktop-package-environment.mjs
++++ b/apps/desktop/scripts/desktop-package-environment.mjs
+@@ -144,7 +144,7 @@ export function validateDesktopPackageEnvironment(environment, target, options =
+   resolveDesktopTargetBuildPaths(environment, target.platform, target.arch)
+   resolveDesktopAppId(environment)
+   resolveNpmRegistry(environment)
+-  if (target.platform !== 'darwin' || !options.unsigned) resolveDesktopPolicyEnvironment(environment)
++  if ((target.platform !== 'darwin' && target.platform !== 'linux') || !options.unsigned) resolveDesktopPolicyEnvironment(environment)
+   if (target.platform === 'darwin') resolveMacOSPackageSettings(environment)
+   else if (target.platform === 'win32') resolveWindowsPackageSettings(environment)
+   if (options.unsigned) return
+diff --git a/apps/desktop/tests/desktop-package-environment.spec.ts b/apps/desktop/tests/desktop-package-environment.spec.ts
+index a8d79a2c..cc5cf42c 100644
+--- a/apps/desktop/tests/desktop-package-environment.spec.ts
++++ b/apps/desktop/tests/desktop-package-environment.spec.ts
+@@ -2,11 +2,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
+ import { describe, expect, it } from 'vitest'
+-import { loadDesktopPackageEnvironment, localMacOSPackageEnvironment, validateDesktopPackageEnvironment } from '../scripts/desktop-package-environment.mjs'
++import { loadDesktopPackageEnvironment, localLinuxPackageEnvironment, localMacOSPackageEnvironment, validateDesktopPackageEnvironment } from '../scripts/desktop-package-environment.mjs'
+ import { resolveWindowsPackageSettings } from '../scripts/windows-package-settings.mjs'
+ 
+ const WINDOWS = { platform: 'win32', arch: 'x64' } as const
+ const MACOS = { platform: 'darwin', arch: 'arm64' } as const
++const LINUX = { platform: 'linux', arch: 'x64' } as const
+ const POLICY = { DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.com',
+   DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: JSON.stringify({ allowedAuthOrigins: ['https://login.example.com'] }) }
+ const RELEASE = { ...POLICY, DSH_DESKTOP_APP_ID: 'com.example.desktop', DOWNLOAD_TEST_ORIGIN: 'https://updates.example.com',
+@@ -121,6 +122,17 @@ describe('Desktop local packaging configuration', () => {
+     expect(parent.DSH_DESKTOP_APP_ID).toBe('com.example.release')
+   })
+ 
++  it('selects Linux local defaults exempt from update policy like macOS unsigned', () => {
++    const parent = {
++      PATH: 'build-tools', HTTPS_PROXY: 'http://proxy.example:8080', DSH_DESKTOP_NPM_REGISTRY: 'https://registry.npmmirror.com',
++      DSH_DESKTOP_APP_ID: 'com.example.release', DSH_DESKTOP_UNSIGNED: '0',
++      DSH_DESKTOP_AUTO_UPDATE_ENV: 'production', DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: 'invalid-json',
++      DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN: 'https://policy.example.com',
++      DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'Release identity', CSC_LINK: 'missing.p12',
++    }
++    expect(parent.DSH_DESKTOP_UNSIGNED).toBe('0')
++  })
++
+   it('takes cache concurrency from the Windows file and defaults to four without ambient overrides', async () => {
+     await withDirectory(async (directory) => {
+       const parent = { DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_CONCURRENCY: '8' }
+-- 
+2.43.0
+
+
+From ead192257b16542cafd213de15e029c6bb48cb2d Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:19:45 +0700
+Subject: [PATCH 03/13] fix(linux): widen x-client-platform headers + platform
+ view to linux
+
+desktop-linux header value; DesktopPlatformView ctor + main
+pass-through; account Config schema. Unblocks tsc -b for the
+linux-x64 pack (policy headers are platform-typed end to end).
+---
+ apps/desktop/src/main.ts                                    | 2 +-
+ apps/desktop/src/platform-view.ts                           | 2 +-
+ .../credentials/deepseek-account/src/client-metadata.ts     | 6 +++---
+ packages/credentials/deepseek-account/src/index.ts          | 6 +++---
+ .../deepseek-account/tests/client-headers.spec.ts           | 2 +-
+ 5 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 2194f677..c30ff70f 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -533,7 +533,7 @@ async function main(): Promise<void> {
+     return next.promise
+   }
+   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
+-    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin',
++    () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin',
+     owner => isMandatory() || updateOverlays.input(owner).blocked)
+   const backend = new DesktopBackendController((onFailure) => {
+     const hostInspectPort = developmentHostInspectPort(development)
+diff --git a/apps/desktop/src/platform-view.ts b/apps/desktop/src/platform-view.ts
+index 7cc85e8c..fcdcc253 100644
+--- a/apps/desktop/src/platform-view.ts
++++ b/apps/desktop/src/platform-view.ts
+@@ -55,7 +55,7 @@ export class DesktopPlatformView {
+    * @param blocked - Whether shell policy or an update prompt prevents opening a product view.
+    */
+   constructor(private readonly preload: string, private readonly getLocale: () => PlatformLocale,
+-    private readonly platform: 'darwin' | 'win32', private readonly blocked: (owner: PlatformOwner) => boolean) {}
++    private readonly platform: 'darwin' | 'win32' | 'linux', private readonly blocked: (owner: PlatformOwner) => boolean) {}
+ 
+   /** @param next - private Host credentials; identity enrichment preserves an already open temporary document. */
+   setSession(next: PlatformSession | null): void {
+diff --git a/packages/credentials/deepseek-account/src/client-metadata.ts b/packages/credentials/deepseek-account/src/client-metadata.ts
+index 76583ca3..68c5b41c 100644
+--- a/packages/credentials/deepseek-account/src/client-metadata.ts
++++ b/packages/credentials/deepseek-account/src/client-metadata.ts
+@@ -23,9 +23,9 @@ export function mergePlatformCookies(base: string, override: string): string {
+  * @param platform - Operating system supplied by the desktop composition.
+  * @returns Platform request headers shared by account and update-policy clients.
+  */
+-export function desktopClientHeaders(platform: 'darwin' | 'win32' | null): Record<string, string> {
++export function desktopClientHeaders(platform: 'darwin' | 'win32' | 'linux' | null): Record<string, string> {
+   if (platform === null) return {}
+-  return { 'x-client-platform': platform === 'win32' ? 'desktop-win' : 'desktop-mac' }
++  return { 'x-client-platform': platform === 'win32' ? 'desktop-win' : platform === 'linux' ? 'desktop-linux' : 'desktop-mac' }
+ }
+ 
+ /**
+@@ -34,7 +34,7 @@ export function desktopClientHeaders(platform: 'darwin' | 'win32' | null): Recor
+  * @param client - identity of the requesting UI for this call.
+  * @returns the five client headers; the bundle ID is intentionally empty.
+  */
+-export function platformClientHeaders(platform: 'darwin' | 'win32' | null, client: AccountClientMetadata): Record<string, string> {
++export function platformClientHeaders(platform: 'darwin' | 'win32' | 'linux' | null, client: AccountClientMetadata): Record<string, string> {
+   return {
+     'x-client-bundle-id': '',
+     'x-client-platform': 'web',
+diff --git a/packages/credentials/deepseek-account/src/index.ts b/packages/credentials/deepseek-account/src/index.ts
+index 8dddec90..8829930f 100644
+--- a/packages/credentials/deepseek-account/src/index.ts
++++ b/packages/credentials/deepseek-account/src/index.ts
+@@ -43,7 +43,7 @@ export interface Config {
+   /** Harness API origin for account notifications. */
+   harnessOrigin?: string
+   /** Native desktop identity for Host API and embedded Platform requests; null identifies the client as web. */
+-  desktopPlatform?: 'darwin' | 'win32' | null
++  desktopPlatform?: 'darwin' | 'win32' | 'linux' | null
+   /** Optional frontend deployment selector for embedded Usage and Top-up pages. */
+   embeddedPageDist?: string
+   /** Exact HTTP(S) origin allowed to receive account tokens for inference and files. */
+@@ -73,7 +73,7 @@ export interface Config {
+ const Config = Schema.object({
+   platformOrigin: Schema.string().default('https://platform.deepseek.com'),
+   harnessOrigin: Schema.string().default('https://harness.deepseek.com'),
+-  desktopPlatform: Schema.union([Schema.const('darwin'), Schema.const('win32'), Schema.const(null)]).default(null),
++  desktopPlatform: Schema.union([Schema.const('darwin'), Schema.const('win32'), Schema.const('linux'), Schema.const(null)]).default(null),
+   embeddedPageDist: Schema.string().default(''),
+   inferenceOrigin: Schema.string().default('https://api.deepseek.com'),
+   allowLoopbackHttp: Schema.boolean().default(false),
+@@ -111,7 +111,7 @@ export class DeepSeekAccount extends TypertRemoteService {
+   private readonly embeddedPageDist: string
+   private readonly inferenceOrigin: string
+   private readonly rewriteBrowserOrigin: boolean
+-  private readonly platform: 'darwin' | 'win32' | null
++  private readonly platform: 'darwin' | 'win32' | 'linux' | null
+   private readonly requestHeaders: Record<string, string>
+   private readonly accountRequestHeaders: Record<string, string>
+   private readonly requestTimeout: number
+diff --git a/packages/credentials/deepseek-account/tests/client-headers.spec.ts b/packages/credentials/deepseek-account/tests/client-headers.spec.ts
+index c346aec1..cd5bb193 100644
+--- a/packages/credentials/deepseek-account/tests/client-headers.spec.ts
++++ b/packages/credentials/deepseek-account/tests/client-headers.spec.ts
+@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
+ import { platformClientHeaders } from '../src/client-metadata.ts'
+ 
+ it.each([
+-  ['darwin', 'desktop-mac'], ['win32', 'desktop-win'], [null, 'web'],
++  ['darwin', 'desktop-mac'], ['win32', 'desktop-win'], ['linux', 'desktop-linux'], [null, 'web'],
+ ] as const)('maps %s to %s and leaves the bundle ID empty', (platform, expected) => {
+   expect(platformClientHeaders(platform, { version: '1.2.3', locale: 'zh-CN', timezoneOffsetSeconds: 28_800 })).toEqual({
+     'x-client-bundle-id': '', 'x-client-platform': expected, 'x-client-version': '1.2.3',
+-- 
+2.43.0
+
+
+From 97172f1dd27dac23183acff97015ecda9f9af84c Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:31:15 +0700
+Subject: [PATCH 04/13] fix(linux): widen remaining platform-typed declarations
+ for linux-x64 pack
+
+release-store target enum, website-installer linux/AppImage, builder
+config .d.mts (github publish + linux block), package-env .d.mts
+(localLinux decl + linux platform), account platform schema+types
+(desktop-linux header), policy-exemption spec. tsc host aggregate
+green; vitest 269+178 green.
+---
+ apps/desktop/electron-builder.config.d.mts        | 15 ++++++++++++++-
+ .../scripts/desktop-auto-update-environment.d.mts |  2 +-
+ .../scripts/desktop-package-environment.d.mts     |  6 ++++--
+ apps/desktop/scripts/desktop-release-store.ts     |  2 +-
+ apps/desktop/scripts/desktop-website-installer.ts |  7 ++++---
+ .../tests/desktop-package-environment.spec.ts     |  6 ++++++
+ .../deepseek-account/tests/account.spec.ts        |  3 +--
+ 7 files changed, 31 insertions(+), 10 deletions(-)
+
+diff --git a/apps/desktop/electron-builder.config.d.mts b/apps/desktop/electron-builder.config.d.mts
+index 2973a6ea..7afc1879 100644
+--- a/apps/desktop/electron-builder.config.d.mts
++++ b/apps/desktop/electron-builder.config.d.mts
+@@ -38,6 +38,19 @@ export interface DesktopElectronBuilderConfig {
+     readonly sign: boolean
+     readonly writeUpdateInfo: boolean
+   }
++  readonly linux: {
++    readonly icon: string
++    readonly category: string
++    readonly desktop: {
++      readonly entry: {
++        readonly Name: string
++        readonly Comment: string
++        readonly Categories: string
++        readonly StartupWMClass: string
++      }
++    }
++    readonly target: readonly ['AppImage']
++  }
+   readonly win: {
+     readonly forceCodeSigning: boolean
+     readonly signtoolOptions: {
+@@ -60,7 +73,7 @@ export interface DesktopElectronBuilderConfig {
+   readonly afterPack: (context: AfterPackContext) => Promise<void>
+   readonly afterSign: (context: AfterPackContext) => Promise<void>
+   readonly artifactBuildCompleted: (artifact: { readonly file: string }) => Promise<void> | undefined
+-  readonly publish: readonly [{ readonly provider: 'generic', readonly url: string }] | null
++  readonly publish: readonly [{ readonly provider: 'generic', readonly url: string } | { readonly provider: 'github', readonly owner: string, readonly repo: string }] | null
+ }
+ 
+ /**
+diff --git a/apps/desktop/scripts/desktop-auto-update-environment.d.mts b/apps/desktop/scripts/desktop-auto-update-environment.d.mts
+index c58df5a0..f85721d2 100644
+--- a/apps/desktop/scripts/desktop-auto-update-environment.d.mts
++++ b/apps/desktop/scripts/desktop-auto-update-environment.d.mts
+@@ -5,7 +5,7 @@ export const DESKTOP_AUTO_UPDATE_ENV: 'DSH_DESKTOP_AUTO_UPDATE_ENV'
+ export type DesktopAutoUpdateEnvironment = 'test' | 'production'
+ 
+ /** Directory name of one supported Desktop release target. */
+-export type DesktopAutoUpdateTarget = 'mac-arm64' | 'mac-x64' | 'win-x64'
++export type DesktopAutoUpdateTarget = 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'
+ 
+ /**
+  * Name the fixed installer object shared by uploading and cache refresh.
+diff --git a/apps/desktop/scripts/desktop-package-environment.d.mts b/apps/desktop/scripts/desktop-package-environment.d.mts
+index ec9da721..28cd887c 100644
+--- a/apps/desktop/scripts/desktop-package-environment.d.mts
++++ b/apps/desktop/scripts/desktop-package-environment.d.mts
+@@ -7,6 +7,8 @@
+  */
+ export function localMacOSPackageEnvironment(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+ 
++export function localLinuxPackageEnvironment(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv
++
+ /**
+  * Read a machine preset when selected, otherwise the target's required dotenv; no ambient release fallback.
+  * PACKAGE_TEST_RELEASE_ID overrides the test preset only; blank retains its configured ID.
+@@ -20,7 +22,7 @@ export function localMacOSPackageEnvironment(environment?: NodeJS.ProcessEnv): N
+  * @returns Isolated environment with file-owned release settings.
+  */
+ export function loadDesktopPackageEnvironment(
+-  platform: 'win32' | 'darwin',
++  platform: 'win32' | 'darwin' | 'linux',
+   environment?: NodeJS.ProcessEnv,
+   appRoot?: string,
+   options?: { unsigned?: boolean, prepareOnly?: boolean },
+@@ -35,6 +37,6 @@ export function loadDesktopPackageEnvironment(
+  */
+ export function validateDesktopPackageEnvironment(
+   environment: NodeJS.ProcessEnv,
+-  target: { platform: 'win32' | 'darwin', arch: string },
++  target: { platform: 'win32' | 'darwin' | 'linux', arch: string },
+   options?: { unsigned?: boolean, prepareOnly?: boolean, skipNotarization?: boolean },
+ ): void
+diff --git a/apps/desktop/scripts/desktop-release-store.ts b/apps/desktop/scripts/desktop-release-store.ts
+index eb9d5457..37798609 100644
+--- a/apps/desktop/scripts/desktop-release-store.ts
++++ b/apps/desktop/scripts/desktop-release-store.ts
+@@ -17,7 +17,7 @@ const sourceSchema = z.strictObject({
+   channel: z.enum(['nightly', 'stable']),
+   runnerName: z.string().min(1),
+   // Storage accepts every Desktop target; CI routing separately limits currently provisioned platforms.
+-  target: z.enum(['mac-arm64', 'mac-x64', 'win-x64']),
++  target: z.enum(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64']),
+   preset: z.enum(['test', 'production']),
+   productVersion: z.string().min(1),
+   version: z.string().min(1),
+diff --git a/apps/desktop/scripts/desktop-website-installer.ts b/apps/desktop/scripts/desktop-website-installer.ts
+index 8e383848..c69aaa14 100644
+--- a/apps/desktop/scripts/desktop-website-installer.ts
++++ b/apps/desktop/scripts/desktop-website-installer.ts
+@@ -36,12 +36,13 @@ export async function prepareWebsiteInstaller(directory: string, manifest: Deskt
+     || source.repository !== repository || source.runId !== route.runId || source.attempt !== route.attempt
+     || source.commit !== route.commit || source.runnerName !== route.runnerName || source.target !== route.target
+     || source.sourceRef !== route.sourceRef || source.channel !== route.channel
+-    || source.qualification !== (route.target === 'win-x64' ? 'signed' : 'notarized')
++    || source.qualification !== (route.target === 'win-x64' ? 'signed' : route.target === 'linux-x64' ? 'unsigned' : 'notarized')
+     || !/^(?:master|dsh-v[0-9][0-9A-Za-z.-]*)$/u.test(source.sourceRef)) {
+     throw new Error('website installer: build identity or production qualification mismatch')
+   }
+   const windows = route.target === 'win-x64'
+-  const filename = `deepseek-harness-${source.version}-${route.target}.${windows ? 'exe' : 'dmg'}`
++  const linux = route.target === 'linux-x64'
++  const filename = `deepseek-harness-${source.version}-${route.target}.${windows ? 'exe' : linux ? 'AppImage' : 'dmg'}`
+   const file = manifest.files.find(item => item.name === filename)
+   if (!file) throw new Error('website installer: selected installer is absent from build manifest')
+   const path = join(directory, file.name)
+@@ -67,7 +68,7 @@ export async function prepareWebsiteInstaller(directory: string, manifest: Deskt
+       secretIdEnvName: 'DOWNLOAD_PROD_COS_SECRET_ID', secretKeyEnvName: 'DOWNLOAD_PROD_COS_SECRET_KEY',
+       artifacts: [{ path, filename: file.name, key, channelMetadata: false,
+         contentDisposition,
+-        contentType: windows ? 'application/vnd.microsoft.portable-executable' : 'application/x-apple-diskimage' }],
++        contentType: windows ? 'application/vnd.microsoft.portable-executable' : linux ? 'application/x-appimage' : 'application/x-apple-diskimage' }],
+     } }
+   } catch (error) {
+     await handle.close()
+diff --git a/apps/desktop/tests/desktop-package-environment.spec.ts b/apps/desktop/tests/desktop-package-environment.spec.ts
+index cc5cf42c..8dc4c3c2 100644
+--- a/apps/desktop/tests/desktop-package-environment.spec.ts
++++ b/apps/desktop/tests/desktop-package-environment.spec.ts
+@@ -130,6 +130,12 @@ describe('Desktop local packaging configuration', () => {
+       DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN: 'https://policy.example.com',
+       DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'Release identity', CSC_LINK: 'missing.p12',
+     }
++    const linuxLocal = localLinuxPackageEnvironment(parent)
++    expect(linuxLocal).toEqual({
++      PATH: parent.PATH, HTTPS_PROXY: parent.HTTPS_PROXY, DSH_DESKTOP_NPM_REGISTRY: parent.DSH_DESKTOP_NPM_REGISTRY,
++      DSH_DESKTOP_APP_ID: 'com.deepseek.harness', DSH_DESKTOP_UNSIGNED: '1',
++    })
++    expect(() => { validateDesktopPackageEnvironment(linuxLocal, LINUX, { unsigned: true }) }).not.toThrow()
+     expect(parent.DSH_DESKTOP_UNSIGNED).toBe('0')
+   })
+ 
+diff --git a/packages/credentials/deepseek-account/tests/account.spec.ts b/packages/credentials/deepseek-account/tests/account.spec.ts
+index 267616da..1c5ac37d 100644
+--- a/packages/credentials/deepseek-account/tests/account.spec.ts
++++ b/packages/credentials/deepseek-account/tests/account.spec.ts
+@@ -957,8 +957,7 @@ it('derives the client headers independently for profile, balance, and logout ca
+ })
+ 
+ it('rejects unsupported native desktop platforms in configuration', () => {
+-  // @ts-expect-error Configuration files can name unsupported operating systems.
+-  expect(() => DeepSeekAccount.Config({ desktopPlatform: 'linux' })).toThrow()
++  expect(() => DeepSeekAccount.Config({ desktopPlatform: 'linux' })).not.toThrow()
+ })
+ 
+ it('retains successful profile data on current failure only for the same credential', async () => {
+-- 
+2.43.0
+
+
+From 4b798556413fec9e424dcadef6bde2da175edf2b Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:33:49 +0700
+Subject: [PATCH 05/13] fix(linux): target-aware electron binary paths + linux
+ CLI launcher
+
+prepare-runtime/prepare-dsh resolved the macOS Electron.app path for
+linux packs (ENOENT); linux dist ships a root 'electron' binary.
+prepareDesktopCli accepts linux (chmod +x, no mac-only link helper).
+266+ tests green incl. launcher + account suites.
+---
+ apps/desktop/scripts/prepare-cli.ts     | 4 ++--
+ apps/desktop/scripts/prepare-dsh.ts     | 3 ++-
+ apps/desktop/scripts/prepare-runtime.ts | 2 +-
+ 3 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/apps/desktop/scripts/prepare-cli.ts b/apps/desktop/scripts/prepare-cli.ts
+index d2b9e142..ad60996b 100644
+--- a/apps/desktop/scripts/prepare-cli.ts
++++ b/apps/desktop/scripts/prepare-cli.ts
+@@ -8,10 +8,10 @@ import { join } from 'node:path'
+  * @param destination - Physical runtime/cli directory prepared for the application.
+  * @param platform - Target Desktop operating system.
+  */
+-export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32'): void {
++export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32' | 'linux'): void {
+   const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
+   const command = join(destination, 'bin', name)
+   mkdirSync(join(destination, 'bin'), { recursive: true })
+   copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
+-  if (platform === 'darwin') chmodSync(command, 0o755)
++  if (platform !== 'win32') chmodSync(command, 0o755)
+ }
+diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
+index a0698880..b182bc94 100644
+--- a/apps/desktop/scripts/prepare-dsh.ts
++++ b/apps/desktop/scripts/prepare-dsh.ts
+@@ -44,7 +44,8 @@ const STORE_ROOT = BUILD_PATHS.pnpmStore
+ const RUNTIME_ROOT = BUILD_PATHS.runtime
+ const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
+ const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
+-const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++const TARGET_PLATFORM = desktopTargetPlatform(resolveDesktopBuildTarget()).platform
++const NODE = join(BUILD_PATHS.electron, TARGET_PLATFORM === 'win32' ? 'electron.exe' : TARGET_PLATFORM === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
+ const PNPM = join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+ 
+ function manifestVersion(path: string, subject: string): string {
+diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
+index 4e338532..4822da11 100644
+--- a/apps/desktop/scripts/prepare-runtime.ts
++++ b/apps/desktop/scripts/prepare-runtime.ts
+@@ -27,7 +27,7 @@ async function prepareElectron({ platform, arch }: DesktopTarget): Promise<strin
+     () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
+   rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
+   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
+-  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : platform === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
+   return execFileSync(executable, ['-p', 'process.versions.node'], {
+     encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+   }).trim()
+-- 
+2.43.0
+
+
+From 8d53e641573a54d505c9dc6e5aa8e6b3daff868b Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:39:55 +0700
+Subject: [PATCH 06/13] fix(linux): widen desktopTargetPlatform return union in
+ .d.mts (host aggregate tsc)
+
+---
+ apps/desktop/scripts/desktop-build-paths.d.mts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/apps/desktop/scripts/desktop-build-paths.d.mts b/apps/desktop/scripts/desktop-build-paths.d.mts
+index 910f3032..3367ce3a 100644
+--- a/apps/desktop/scripts/desktop-build-paths.d.mts
++++ b/apps/desktop/scripts/desktop-build-paths.d.mts
+@@ -46,7 +46,7 @@ export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget, environ
+  * @returns Platform and architecture of the prepared payload.
+  */
+ export function desktopTargetPlatform(target: DesktopAutoUpdateTarget): {
+-  readonly platform: 'darwin' | 'win32'
++  readonly platform: 'darwin' | 'win32' | 'linux'
+   readonly arch: 'arm64' | 'x64'
+ }
+ 
+-- 
+2.43.0
+
+
+From ccd87b9b28a836c4142c77f8b73777892215dea9 Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:45:54 +0700
+Subject: [PATCH 07/13] fix(linux): skip mandatory policy for unsigned linux
+ packs (parity with mac local builds)
+
+createElectronBuilderConfig resolved policy for every non-mac pack;
+linux unsigned is codeless by design, so electron-builder died on
+missing TEST_ORIGIN. Unsigned linux now skips policy like mac.
+---
+ apps/desktop/scripts/electron-builder-config.mjs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index a2c615fa..8cbea9d9 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -66,7 +66,7 @@ export function createElectronBuilderConfig(
+   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
+   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
+   const packagesWindows = resolvedPlatform === 'win32'
+-  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
++  const policy = (packagesMacOS || resolvedPlatform === 'linux') && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
+   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
+   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
+   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
+-- 
+2.43.0
+
+
+From 22b514f348487fa47ef0995a52fdb2211a306b2d Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:48:39 +0700
+Subject: [PATCH 08/13] fix(tests): hermetic feed default/ordering specs
+ (ignore ambient DSH_UPDATE_OWNER)
+
+CI stamps DSH_UPDATE_OWNER=ImBIOS for the pack; the impl correctly
+prefers process.env over null readers, so the specs must clear the
+var to assert the no-configuration default. Green with and without
+the var set.
+---
+ apps/desktop/tests/forkhub-update-feed.spec.ts | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/tests/forkhub-update-feed.spec.ts b/apps/desktop/tests/forkhub-update-feed.spec.ts
+index 2b6cb62e..621d75e2 100644
+--- a/apps/desktop/tests/forkhub-update-feed.spec.ts
++++ b/apps/desktop/tests/forkhub-update-feed.spec.ts
+@@ -21,11 +21,22 @@ describe('forkhub update feed', () => {
+   })
+ 
+   it('defaults to with-fh/.forkhub with no configuration', () => {
+-    expect(getUpdateFeed({ persistedOwner: () => null, envOwner: () => null, bakedDefault: () => null }))
+-      .toEqual({ owner: FORKHUB_DEFAULT_OWNER, repo: FORKHUB_DEFAULT_REPO })
++    // Hermetic: the process env may carry DSH_UPDATE_OWNER (CI stamps it
++    // for the pack); the default must not depend on ambient env.
++    const saved = process.env.DSH_UPDATE_OWNER
++    delete process.env.DSH_UPDATE_OWNER
++    try {
++      expect(getUpdateFeed({ persistedOwner: () => null, envOwner: () => null, bakedDefault: () => null }))
++        .toEqual({ owner: FORKHUB_DEFAULT_OWNER, repo: FORKHUB_DEFAULT_REPO })
++    } finally {
++      if (saved !== undefined) process.env.DSH_UPDATE_OWNER = saved
++    }
+   })
+ 
+   it('orders persisted override above env above baked default', () => {
++    const saved = process.env.DSH_UPDATE_OWNER
++    delete process.env.DSH_UPDATE_OWNER
++    try {
+     const baked = { owner: 'baked-owner', repo: '.forkhub' as const }
+     expect(getUpdateFeed({ persistedOwner: () => 'picked', envOwner: () => 'env-owner', bakedDefault: () => baked }).owner)
+       .toBe('picked')
+@@ -33,6 +44,9 @@ describe('forkhub update feed', () => {
+       .toBe('env-owner')
+     expect(getUpdateFeed({ persistedOwner: () => null, envOwner: () => null, bakedDefault: () => baked }).owner)
+       .toBe('baked-owner')
++    } finally {
++      if (saved !== undefined) process.env.DSH_UPDATE_OWNER = saved
++    }
+   })
+ 
+   it('reads the baked default from packaged manifest extraMetadata', () => {
+-- 
+2.43.0
+
+
+From b7a48c7402917360cccc3bdf82e1e04876e81d1e Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:52:35 +0700
+Subject: [PATCH 09/13] fix(linux): pin linux executableName/desktopName
+ (AppImage rejects scoped name)
+
+electron-builder derived @deepseek-aidsh-desktop from the package
+name; set deepseek-harness explicitly + syncDesktopName. Spec asserts
+the pin.
+---
+ apps/desktop/scripts/electron-builder-config.mjs         | 3 +++
+ apps/desktop/tests/electron-builder-config-linux.spec.ts | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index 8cbea9d9..8e83dd3a 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -266,6 +266,9 @@ export function createElectronBuilderConfig(
+     linux: {
+       icon: fileURLToPath(new URL('../resources/icon.png', import.meta.url)),
+       category: 'Development',
++      executableName: 'deepseek-harness',
++      desktopName: 'deepseek-harness',
++      syncDesktopName: true,
+       desktop: {
+         entry: {
+           Name: 'DeepSeek Harness',
+diff --git a/apps/desktop/tests/electron-builder-config-linux.spec.ts b/apps/desktop/tests/electron-builder-config-linux.spec.ts
+index 35452e90..d80e2461 100644
+--- a/apps/desktop/tests/electron-builder-config-linux.spec.ts
++++ b/apps/desktop/tests/electron-builder-config-linux.spec.ts
+@@ -19,6 +19,8 @@ describe('electron-builder linux config', () => {
+       DOWNLOAD_TEST_RELEASE_ID: '0123456789abcdef0123456789abcdef',
+     }, 'linux', 'x64')
+     expect(config.linux.target).toContain('AppImage')
++    expect(config.linux.executableName).toBe('deepseek-harness')
++    expect(config.linux.desktopName).toBe('deepseek-harness')
+     expect(config.linux.desktop.entry.StartupWMClass).toBe('DeepSeek Harness')
+     expect(config.linux.desktop.entry.Name).toBe('DeepSeek Harness')
+   })
+-- 
+2.43.0
+
+
+From 5bd349fc59d014af6e89d98881ce196ff6d66469 Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 14:58:51 +0700
+Subject: [PATCH 10/13] fix(linux): drop desktopName from linux block
+ (package.json key, breaks schema)
+
+syncDesktopName falls back to executableName (deepseek-harness), so
+the .desktop filename still matches. Schema-validated.
+---
+ apps/desktop/scripts/electron-builder-config.mjs         | 1 -
+ apps/desktop/tests/electron-builder-config-linux.spec.ts | 2 +-
+ 2 files changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index 8e83dd3a..c909d931 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -267,7 +267,6 @@ export function createElectronBuilderConfig(
+       icon: fileURLToPath(new URL('../resources/icon.png', import.meta.url)),
+       category: 'Development',
+       executableName: 'deepseek-harness',
+-      desktopName: 'deepseek-harness',
+       syncDesktopName: true,
+       desktop: {
+         entry: {
+diff --git a/apps/desktop/tests/electron-builder-config-linux.spec.ts b/apps/desktop/tests/electron-builder-config-linux.spec.ts
+index d80e2461..6f6edb4f 100644
+--- a/apps/desktop/tests/electron-builder-config-linux.spec.ts
++++ b/apps/desktop/tests/electron-builder-config-linux.spec.ts
+@@ -20,7 +20,7 @@ describe('electron-builder linux config', () => {
+     }, 'linux', 'x64')
+     expect(config.linux.target).toContain('AppImage')
+     expect(config.linux.executableName).toBe('deepseek-harness')
+-    expect(config.linux.desktopName).toBe('deepseek-harness')
++    expect(config.linux.syncDesktopName).toBe(true)
+     expect(config.linux.desktop.entry.StartupWMClass).toBe('DeepSeek Harness')
+     expect(config.linux.desktop.entry.Name).toBe('DeepSeek Harness')
+   })
+-- 
+2.43.0
+
+
+From d346bbd4d5d5d6a046d6cf6c01acb1b80669a521 Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 15:05:08 +0700
+Subject: [PATCH 11/13] fix(linux): smoke-packaged-runtime resolves
+ linux-unpacked layout
+
+---
+ apps/desktop/scripts/smoke-packaged-runtime.ts | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/scripts/smoke-packaged-runtime.ts b/apps/desktop/scripts/smoke-packaged-runtime.ts
+index 6c3c12c8..44d25566 100644
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts
+@@ -12,10 +12,12 @@ const { values } = parseArgs({ options: { unsigned: { type: 'boolean', default:
+ const target = resolveDesktopBuildTarget()
+ const windows = target === 'win-x64'
+ const artifacts = desktopArtifactOutput(paths, { unsigned: values.unsigned, skipNotarization: values['skip-notarization'] }).directory
++const linux = target === 'linux-x64'
+ const application = windows ? join(artifacts, 'win-unpacked')
++  : linux ? join(artifacts, 'linux-unpacked')
+   : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
+-const resources = join(application, windows ? 'resources' : 'Resources')
+-const executable = windows ? join(application, 'DeepSeek Harness.exe') : join(application, 'MacOS', 'DeepSeek Harness')
++const resources = join(application, windows ? 'resources' : linux ? 'resources' : 'Resources')
++const executable = windows ? join(application, 'DeepSeek Harness.exe') : linux ? join(application, 'deepseek-harness') : join(application, 'MacOS', 'DeepSeek Harness')
+ const descriptor = await verifyDesktopRuntime(paths.dsh, readDesktopRuntime(paths.dsh).release.version,
+   resolveDesktopPackageTarget(target))
+ if (windows && !values.unsigned) await verifyWindowsCode(application)
+-- 
+2.43.0
+
+
+From 9a79737d98e0d7af482dffdd04fe025b4cb6bbdc Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 15:20:28 +0700
+Subject: [PATCH 12/13] fix(linux): reliable engine-presence check in
+ office-kit resolver (readdirSync)
+
+Electron's ASAR lstatSync answers phantom stats for missing nested
+paths, misreporting absent native engines as broken installs and
+blocking the Linux WASM fallback (bricked docx in the AppImage).
+readdirSync throws ENOENT reliably for the same paths; EACCES-class
+errors still propagate. Specs updated to the new primitive.
+---
+ packages/document/office-kit/src/locate.ts    | 21 +++++++++++---
+ .../office-kit/tests/engine-package.spec.ts   | 29 ++++++++++++-------
+ 2 files changed, 35 insertions(+), 15 deletions(-)
+
+diff --git a/packages/document/office-kit/src/locate.ts b/packages/document/office-kit/src/locate.ts
+index 827ecfe4..9d5d91a5 100644
+--- a/packages/document/office-kit/src/locate.ts
++++ b/packages/document/office-kit/src/locate.ts
+@@ -1,5 +1,5 @@
+ /** Locate LibreOffice Kit and its engine packages from the consumer's Kit installation without module hooks. */
+-import { lstatSync } from 'node:fs'
++import { readdirSync } from 'node:fs'
+ import { createRequire } from 'node:module'
+ import { join } from 'node:path'
+ 
+@@ -60,9 +60,22 @@ export function createEnginePackageResolver(kitEntry: string | URL): EnginePacka
+       manifest = fromKit.resolve(`${name}/package.json`)
+     } catch (error) {
+       if (error instanceof Error && 'code' in error && error.code === 'MODULE_NOT_FOUND') {
+-        const installed = (fromKit.resolve.paths(name) ?? []).some(directory =>
+-          lstatSync(join(directory, name), { throwIfNoEntry: false }) !== undefined,
+-        )
++        // Directory listing (not lstatSync): Electron's ASAR filesystem
++        // answers lstatSync with phantom stats for missing nested paths,
++        // which misreports absent native engines as broken installs and
++        // blocks the WASM fallback on Linux. readdirSync throws ENOENT
++        // reliably for the same paths.
++        const installed = (fromKit.resolve.paths(name) ?? []).some((directory) => {
++          try {
++            readdirSync(join(directory, name))
++            return true
++          } catch (error) {
++            // Missing entries read as absent (WASM fallback); inspection
++            // failures (EACCES, ENOTDIR, …) propagate unchanged.
++            if (error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return false
++            throw error
++          }
++        })
+         if (installed) throw new Error(`Installed LibreOfficeKit package is incomplete: ${name}. Reinstall the package.`, { cause: error })
+       }
+       throw error
+diff --git a/packages/document/office-kit/tests/engine-package.spec.ts b/packages/document/office-kit/tests/engine-package.spec.ts
+index 89d22d2e..924322d5 100644
+--- a/packages/document/office-kit/tests/engine-package.spec.ts
++++ b/packages/document/office-kit/tests/engine-package.spec.ts
+@@ -1,5 +1,5 @@
+ /** Engine resolution distinguishes missing installations from incomplete ones and preserves ASAR asset paths. */
+-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
++import { mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+ import { createRequire } from 'node:module'
+ import { pathToFileURL } from 'node:url'
+ import { tmpdir } from 'node:os'
+@@ -13,7 +13,7 @@ vi.mock('node:module', async (original) => {
+ })
+ vi.mock('node:fs', async (original) => {
+   const actual = await original<typeof import('node:fs')>()
+-  return { ...actual, lstatSync: vi.fn(actual.lstatSync) }
++  return { ...actual, readdirSync: vi.fn(actual.readdirSync) }
+ })
+ const { createRequire: nodeCreateRequire } = await vi.importActual<typeof import('node:module')>('node:module')
+ 
+@@ -78,14 +78,10 @@ it('uses physical native paths and preserves the WASM logical path in an archive
+     .toBe('/App/resources/app.asar/dsh/node_modules/@deepseek-ai/libreoffice-kit-wasm/package.json')
+ })
+ 
+-it.each(['missing manifest', 'dangling symlink', 'absent'] as const)(
++it.each(['missing manifest', 'absent'] as const)(
+   'distinguishes an engine package with %s on the kit resolution path', (state) => {
+     const fixture = engineTree()
+     if (state === 'missing manifest') mkdirSync(fixture.directory, { recursive: true })
+-    if (state === 'dangling symlink') {
+-      mkdirSync(dirname(fixture.directory), { recursive: true })
+-      symlinkSync(join(fixture.root, 'missing-target'), fixture.directory, 'junction')
+-    }
+     const error = thrownBy(() => fixture.resolveEnginePackage(fixture.name))
+     const nodeError: unknown = fixture.resolve.mock.results[0]?.value
+     expect(nodeError).toMatchObject({ code: 'MODULE_NOT_FOUND' })
+@@ -102,6 +98,17 @@ it.each(['missing manifest', 'dangling symlink', 'absent'] as const)(
+   },
+ )
+ 
++it('falls back to WASM when the native engine link dangles (Electron ASAR readdir contract)', () => {
++  // readdirSync follows the link: a dangling native symlink reads as
++  // absent, so resolution falls back to WASM instead of bricking docx.
++  const fixture = engineTree()
++  mkdirSync(dirname(fixture.directory), { recursive: true })
++  symlinkSync(join(fixture.root, 'missing-target'), fixture.directory, 'junction')
++  const error = thrownBy(() => fixture.resolveEnginePackage(fixture.name))
++  expect(error).toMatchObject({ code: 'MODULE_NOT_FOUND' })
++  expect(error).toBe(fixture.resolve.mock.results[0]?.value)
++})
++
+ it('keeps a Node resolution error other than MODULE_NOT_FOUND unchanged', () => {
+   const fixture = engineTree()
+   mkdirSync(fixture.directory, { recursive: true })
+@@ -109,7 +116,7 @@ it('keeps a Node resolution error other than MODULE_NOT_FOUND unchanged', () =>
+   const error = thrownBy(() => fixture.resolveEnginePackage(fixture.name))
+   expect(error).toMatchObject({ code: 'ERR_INVALID_PACKAGE_CONFIG' })
+   expect(error).toBe(fixture.resolve.mock.results[0]?.value)
+-  expect(lstatSync).not.toHaveBeenCalled()
++  expect(readdirSync).not.toHaveBeenCalled()
+ })
+ 
+ it('preserves Node missing errors when the name has no package search paths', () => {
+@@ -117,7 +124,7 @@ it('preserves Node missing errors when the name has no package search paths', ()
+   const error = thrownBy(() => fixture.resolveEnginePackage('node:fs'))
+   expect(error).toMatchObject({ code: 'MODULE_NOT_FOUND' })
+   expect(error).toBe(fixture.resolve.mock.results[0]?.value)
+-  expect(lstatSync).not.toHaveBeenCalled()
++  expect(readdirSync).not.toHaveBeenCalled()
+ })
+ 
+ it('propagates permission errors while checking the kit installation', () => {
+@@ -126,8 +133,8 @@ it('propagates permission errors while checking the kit installation', () => {
+   const paths = fixture.kit.resolve.paths(fixture.name)
+   if (!paths?.[0]) throw new Error('Fixture package must have Node resolution paths')
+   const firstDirectory = join(paths[0], fixture.name)
+-  vi.mocked(lstatSync).mockImplementationOnce((path) => {
+-    expect(path).toBe(firstDirectory)
++  vi.mocked(readdirSync).mockImplementationOnce((path) => {
++    expect(String(path)).toBe(firstDirectory)
+     throw denied
+   })
+   expect(thrownBy(() => fixture.resolveEnginePackage(fixture.name))).toBe(denied)
+-- 
+2.43.0
+
+
+From 2d814902eb00fd6a41978568f6fc531525b183fa Mon Sep 17 00:00:00 2001
+From: ImBIOS <imamuzzaki@gmail.com>
+Date: Fri, 13 Nov 2026 15:27:16 +0700
+Subject: [PATCH 13/13] fix(linux): .d.mts tracks
+ executableName/syncDesktopName
+
+---
+ apps/desktop/electron-builder.config.d.mts | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/apps/desktop/electron-builder.config.d.mts b/apps/desktop/electron-builder.config.d.mts
+index 7afc1879..c063fe30 100644
+--- a/apps/desktop/electron-builder.config.d.mts
++++ b/apps/desktop/electron-builder.config.d.mts
+@@ -41,6 +41,8 @@ export interface DesktopElectronBuilderConfig {
+   readonly linux: {
+     readonly icon: string
+     readonly category: string
++    readonly executableName: string
++    readonly syncDesktopName: boolean
+     readonly desktop: {
+       readonly entry: {
+         readonly Name: string
+-- 
+2.43.0
+
