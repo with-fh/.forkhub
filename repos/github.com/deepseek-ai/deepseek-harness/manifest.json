@@ -25,8 +25,7 @@
       "branch": "dsh/forkhub-support",
       "last_realized_against_commit": "ddac96760b6e0df8fa0fe17cbdcf0b512f4c12b2c",
       "note": "Realized against upstream master fcc0ad4 (merge of dsh-v0.2.2-rc.1); 277k stars >= 2k gate",
-      "target_area": [
-        "apps/desktop/scripts/desktop-package-environment.mjs",
+      "target_area": [        "apps/desktop/scripts/desktop-package-environment.mjs",
         "apps/desktop/scripts/electron-builder-config.mjs",
         "apps/desktop/src/forkVersion.ts",
         "apps/desktop/src/ipc.ts",
@@ -47,12 +46,25 @@
         "packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts"
       ],
       "last_realized_against_tag": "dsh-v0.2.2-rc.2"
+    },
+    "dsh-linux-support-1b2e3f10": {
+      "status": "applied",
+      "version": "1.0.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "dsh/linux-support",
+      "last_realized_against_commit": "ddac96760b6e0df8fa0fe17cbdcf0b512f4c12b2c",
+      "last_realized_against_tag": "dsh-v0.2.2-rc.2",
+      "note": "Ported from ImBIOS/.forkhub PR #5 (CI green run 43548361224, release v0.2.2-rc.3.imbios.20261114.1); applies on top of dsh-forkhub-support-0qjj6stm, verified on rc.3 (384/384 focused suites). Retires the ImBIOS catalog copy.",
+      "depends_on_note": "Applies ONLY on top of dsh-forkhub-support-0qjj6stm in this same manifest (apply_order) — never on stock."
     }
   },
   "apply_order": [
-    "dsh-forkhub-support-0qjj6stm"
+    "dsh-forkhub-support-0qjj6stm",
+    "dsh-linux-support-1b2e3f10"
   ],
   "slug_aliases": {
-    "dsh-forkhub-support": "dsh-forkhub-support-0qjj6stm"
+    "dsh-forkhub-support": "dsh-forkhub-support-0qjj6stm",
+    "dsh-linux-support": "dsh-linux-support-1b2e3f10"
   }
 }

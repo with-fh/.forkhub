@@ -26,17 +26,19 @@ and cross-owner pairs refuse.
 
 ## What each leg builds (mirror of official, unsigned)
 
-Upstream `apps/desktop/scripts/package-target.ts` supports
-`mac-arm64 | mac-x64 | win-x64` only (no linux target — Linux ships
-from the downstream ImBIOS catalog). Unsigned (no certs in this
+Upstream `package:linux:x64:unsigned` (+ the `dsh-linux-support`
+patch in this manifest's stack) adds `linux-x64` alongside
+`mac-arm64 | mac-x64 | win-x64`. Unsigned (no certs in this
 catalog): mac legs run `package:mac:<arch>:unsigned`, win runs
-`package:win:x64:unsigned`; Gatekeeper right-click-Open on first launch;
-SmartScreen warnings on Windows ("More info → Run anyway").
+`package:win:x64:unsigned`, linux runs `package:linux:x64:unsigned`;
+Gatekeeper right-click-Open on first launch; SmartScreen warnings on
+Windows ("More info → Run anyway").
 
 | leg | artifacts |
 |---|---|
 | mac (`macos-26`, unsigned) | `*.dmg` + `*.zip` (arm64 + x64), `latest-mac.yml` + `fh-mac.yml` |
 | win (`windows-latest`, unsigned) | unsigned `*.exe`, `latest.yml` + `fh.yml` |
+| linux (`ubuntu-24.04`, unsigned) | unsigned `*.AppImage`, `latest-linux.yml` + `fh-linux.yml` |
 
 Every leg also emits `*.blockmap` sidecars (differential updates).
 
@@ -72,9 +74,14 @@ registry `tagMatch` (`^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+\.<owner>\.[0-9]{8}\.[0
 per-owner) never collides with upstream `dsh-v*` prereleases or
 namespaced bundle tags.
 
-## Linux (downstream ImBIOS)
+## Linux (in-catalog since dsh-linux-support port)
 
-`package-target.ts` `SUPPORTED_TARGETS` has no linux entry; adding
-`linux-x64` (AppImage + deb, XDG desktop-entry/WM_CLASS contract,
-node-pty `prebuilds/linux-x64`) is the ImBIOS `dsh-linux-support`
-patch, which `depends_on` this channel patch — same split as Natively.
+The `dsh-linux-support-1b2e3f10` patch (ported from ImBIOS/.forkhub
+PR #5, CI-green there as `v0.2.2-rc.3.imbios.20261114.1`) adds the
+`linux-x64` target (AppImage, XDG desktop-entry/WM_CLASS contract,
+node-pty `prebuilds/linux-x64`, XDG autostart, per-publisher credit)
+on top of the channel patch via this manifest's `apply_order` —
+same channel+linux layering as Natively, now in one catalog. The
+linux leg runs on `ubuntu-24.04` (Electron 44 smoke SIGSEGVs on
+26.04; node 24; `xvfb-run` + `ELECTRON_DISABLE_SANDBOX=1` for the
+headless smoke).
