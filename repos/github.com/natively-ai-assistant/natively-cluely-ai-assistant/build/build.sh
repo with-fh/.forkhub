@@ -10,8 +10,10 @@
 # FORKHUB_OS_MARKER reuse keeps one release number). NOTE for this
 # target: upstream.json runs mac + win only — the `linux)` case arms
 # below are dormant here (kept: this script is shared shape across
-# targets; Linux installers for Natively ship from the downstream ImBIOS
-# catalog, which layers natively-linux-support over this patch).
+# targets; no Linux leg runs for Natively in this catalog (the `linux)`
+# case arms below are dormant here — this script keeps the shared shape
+# across targets. Linux installers are not currently published; a
+# companion natively-linux-support patch is tracked as follow-up work).
 #
 # The shared builder image only guarantees bun (+ node/cargo on GHA
 # runners). This target brings its own toolchain (node 22 to match
