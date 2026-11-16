@@ -7,11 +7,13 @@
 # apps/desktop/src/updateFeed.ts: the fork channel is `github`, so the app
 # resolves `latest-mac.yml` / `latest.yml` per platform).
 #
-# Multi-OS: every leg (mac/win) uploads its own platform files into the
-# SAME updater release (create-or-upload with --clobber; filenames are
-# disjoint per platform, so parallel legs never clobber each other):
+# Multi-OS: every leg (mac/win/linux) uploads its own platform files
+# into the SAME updater release (create-or-upload with --clobber;
+# filenames are disjoint per platform, so parallel legs never clobber
+# each other):
 #   mac    dmg + zip + latest-mac.yml + fh-mac.yml + blockmaps
 #   win    exe (nsis portable-equivalent unsigned) + latest.yml + fh.yml + blockmaps
+#   linux  AppImage + latest-linux.yml + fh-linux.yml + blockmaps
 set -eu
 
 DIST="${DIST:?}"
@@ -29,10 +31,12 @@ fi
 # them (a leg only ever carries its own OS files).
 HAVE_MAC=""
 HAVE_WIN=""
+HAVE_LINUX=""
 [ -n "$(ls "$DIST"/latest-mac.yml 2>/dev/null)" ] && HAVE_MAC="1" || true
 [ -n "$(ls "$DIST"/latest.yml 2>/dev/null)" ] && HAVE_WIN="1" || true
-if [ -z "$HAVE_MAC$HAVE_WIN" ]; then
-  echo "no updater manifest (latest-mac.yml / latest.yml) in dist; skipping updater publish"
+[ -n "$(ls "$DIST"/latest-linux.yml 2>/dev/null)" ] && HAVE_LINUX="1" || true
+if [ -z "$HAVE_MAC$HAVE_WIN$HAVE_LINUX" ]; then
+  echo "no updater manifest (latest-mac.yml / latest.yml / latest-linux.yml) in dist; skipping updater publish"
   exit 0
 fi
 
@@ -54,6 +58,18 @@ if [ -n "$HAVE_MAC" ]; then
 fi
 if [ -n "$HAVE_WIN" ]; then
   for f in "$DIST"/*.exe "$DIST"/latest.yml "$DIST"/fh.yml "$DIST"/*.blockmap; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in
+      *.blockmap)
+        base=$(basename "$f" .blockmap)
+        [ -e "$DIST/$base" ] || continue
+        ;;
+    esac
+    set -- "$@" "$f"
+  done
+fi
+if [ -n "$HAVE_LINUX" ]; then
+  for f in "$DIST"/*.AppImage "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml "$DIST"/*.blockmap; do
     [ -e "$f" ] || continue
     case "$(basename "$f")" in
       *.blockmap)
