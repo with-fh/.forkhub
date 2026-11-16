@@ -5,10 +5,14 @@ per OS (`upstream.json:build_runs_on`: `macos-26`, `windows-latest`)
 after the intent stack is applied and `verify.sh` passes. The catalog
 follows upstream **stable** (newest lowercase-`v` tag; see the tag note
 below). Each build carries a ForkHub provenance version
-`<upstream>-fh.<owner>.<n>` (e.g. `2.8.1-fh.imbios.1`).
+`<upstream>-fh.<owner>.<n>` (e.g. `2.8.1-fh.with-fh.1`).
 
-Linux installers (AppImage + deb) ship from the downstream ImBIOS
-catalog, which layers `natively-linux-support` over this patch.
+No Linux leg runs for this target: Linux installers (AppImage + deb)
+are not currently published from this catalog. A companion
+`natively-linux-support` patch (linux desktop target, dock identity,
+open-at-login entry, system-audio backend, deb hook, per-publisher
+About credit, layered on this patch via `depends_on`) is tracked as
+follow-up work — until it lands, Linux users stay on upstream builds.
 
 ## What each leg builds (mirror of official, unsigned)
 
@@ -106,7 +110,8 @@ deb, checksums, build log, notes).
   (`electron/premium/featureGate.ts`); the patch's `HardwareId` fallback
   chain is what makes trial/licensing work without it.
 - **No Linux leg.** The shared workflow fans out only over
-  `upstream.json:build_runs_on` (mac + win for this target). The Linux
-  dock identity, open-at-login entry, system-audio backend, deb hook,
-  and per-publisher About credit ship from the downstream ImBIOS
-  catalog (`natively-linux-support`, `depends_on` this patch).
+  `upstream.json:build_runs_on` (mac + win for this target), so no Linux
+  artifacts publish from this catalog. The planned Linux surface (dock
+  identity, open-at-login entry, system-audio backend, deb hook, and
+  per-publisher About credit, as a `natively-linux-support` patch with
+  `depends_on` this patch) is follow-up work, not yet realized.

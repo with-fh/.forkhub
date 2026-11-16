@@ -22,7 +22,7 @@
     },
     "natively": {
       "target": "github.com/Natively-AI-assistant/natively-cluely-ai-assistant",
-      "description": "Natively x ForkHub update channel for Windows (Linux served by the ImBIOS catalog; macOS via the in-app updater for now)",
+      "description": "Natively x ForkHub update channel for Windows (macOS via the in-app updater for now; no Linux leg runs in this catalog yet)",
       "bin": "Natively",
       "defaultChannel": "stable",
       "asset": "Natively.{version}.exe",
