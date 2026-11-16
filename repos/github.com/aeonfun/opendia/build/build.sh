@@ -55,13 +55,30 @@ case "$TAG" in
 esac
 
 # Provenance version: <upstream>-fh.<owner>.<n>, e.g. 1.1.4-fh.with-fh.1
+# NOTE: this target has NO updater (v<base>-fh...) releases (no publish.sh
+# hook), so N MUST count the namespaced bundle tags
+# ($SLUG-$UP-fhN) — the same counter the shared workflow uses for the
+# release it publishes into. Counting updater tags would pin N=1 forever
+# and every rebuild would re-submit the same AMO manifest version (409).
 OWNER=$(printf '%s' "$REPO" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
 VER=$(printf '%s' "$TAG" | sed 's/^v//')
-ESCAPED_BASE=$(printf '%s' "$VER" | sed 's/\./\\./g')
+SLUG=$(printf '%s' "${FORKHUB_TARGET:-github.com/aeonfun/opendia}" | awk -F/ '{print $(NF-1)"-"$NF}' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')
 EXISTING_TAGS=$(gh api "repos/$REPO/releases?per_page=100" --jq '.[].tag_name' 2>/dev/null) \
   || fail_soft "could not list releases to number the ForkHub build (gh api failed)"
-N=$(printf '%s\n' "$EXISTING_TAGS" | grep -cE "^v${ESCAPED_BASE}[-.]fh\\.${OWNER}\\.[0-9]+\$" || true)
+N=$(printf '%s\n' "$EXISTING_TAGS" | grep -cE "^${SLUG}-+${TAG}-fh[0-9]+\$" || true)
 N=$((N + 1))
+# force=true rebuilds reuse the SAME bundle number when the newest bundle
+# is incomplete — but AMO versions are unique per add-on ID, so the manifest
+# stamp must still advance. If the newest $SLUG-$UP-fhN bundle already
+# carries a signed XPI, N counts it and we move past it; if it does NOT
+# (failed sign), reuse would 409, so bump once more.
+if [ "$N" -gt 1 ]; then
+  NEWEST=$(printf '%s\n' "$EXISTING_TAGS" | grep -E "^${SLUG}-+${TAG}-fh[0-9]+\$" | sed -E 's/.*-fh([0-9]+)$/\1 \0/' | sort -n | tail -1 | awk '{print $2}')
+  if [ -n "${NEWEST:-}" ] && ! gh release view "$NEWEST" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null | grep -qE "\.xpi$"; then
+    say "newest bundle $NEWEST has no signed XPI (failed sign); reusing its number"
+    N=$((N - 1))
+  fi
+fi
 FORKHUB_VERSION="$VER-fh.$OWNER.$N"
 export FORKHUB_VERSION
 say "FORKHUB_VERSION=$FORKHUB_VERSION"
