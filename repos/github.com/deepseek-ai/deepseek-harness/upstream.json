@@ -4,8 +4,8 @@
   "upstream_remote": "upstream",
   "fork_url": "git@github.com:ImBIOS/deepseek-harness.git",
   "fork_remote": "origin",
-  "last_known_upstream_sha": "dsh-v0.2.2-rc.2",
-  "last_synced_at": "2026-11-06T00:00:00.000Z",
+  "last_known_upstream_sha": "dsh-v0.2.2-rc.3",
+  "last_synced_at": "2026-11-16T00:00:00.000Z",
   "schedule": "on-upstream-release",
   "version_suffix": "fh",
   "build_runs_on": [

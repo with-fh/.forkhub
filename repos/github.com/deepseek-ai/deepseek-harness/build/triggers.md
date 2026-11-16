@@ -14,8 +14,13 @@ Default choice (mirrors the Natively target; user-explicit change welcome):
   rebuilds even an already-built tag. First build: dispatch with
   `target: github.com/deepseek-ai/deepseek-harness`
   (or push this target dir — same effect). One leg per OS runs
-  (`macos-26`, `windows-latest`); per-OS skip markers
-  mean a finished leg never blocks the others.
+  (`macos-26`, `windows-latest`, `ubuntu-24.04`); per-OS skip markers
+  (`*.dmg` / `*.exe` / `*.AppImage`) mean a finished leg never blocks
+  the others. All legs converge on ONE unified updater release
+  `v<base>.with-fh.<date>.<n>` (linux AppImage + win exe +
+  `fh.yml/latest.yml` + `fh-linux.yml/latest-linux.yml`); the mac dmg
+  rides the matching namespaced bundle release
+  (`deepseek-ai-deepseek-harness-<tag>-fh<N>`) with the full notes.
 
 To change the poll cadence, edit the cron in
 `.github/workflows/forkhub-build.yml` (shared file — affects all targets).
