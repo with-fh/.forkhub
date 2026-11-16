@@ -51,20 +51,17 @@
       "assets": {
         "win32-x64": "deepseek-harness-{version}-win-x64-unsigned.exe",
         "darwin-arm64": "deepseek-harness-{version}-mac-arm64-unsigned.dmg",
-        "darwin-x64": "deepseek-harness-{version}-mac-x64-unsigned.dmg",
         "linux-x64": "deepseek-harness-{version}-linux-x86_64-unsigned.AppImage"
       },
       "binPaths": {
         "win32-x64": "{asset}",
         "darwin-arm64": "{asset}",
-        "darwin-x64": "{asset}",
         "linux-x64": "{asset}"
       },
       "extract": "none",
       "platforms": [
         "win32-x64",
         "darwin-arm64",
-        "darwin-x64",
         "linux-x64"
       ],
       "channels": {
