@@ -19,12 +19,12 @@
     },
     "dsh-forkhub-support-0qjj6stm": {
       "status": "applied",
-      "version": 2,
+      "version": 3,
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "dsh/forkhub-support",
       "last_realized_against_commit": "38a6a5c965aa99ab525161efb7cc5cf1fe62fced",
-      "note": "Realized against upstream dsh-v0.2.2-rc.3 (38a6a5c9); channel stack verified locally 2026-11-16 (9 channel suites green). 280k stars >= 2k gate",
+      "note": "Realized against upstream dsh-v0.2.2-rc.3 (38a6a5c9); channel stack verified locally 2026-11-16 (9 channel suites green). v3: provider channel left unset so the GitHubProvider loop resolves the unified feed (verified live: nightly pin finds nothing, unset finds the unified release). 280k stars >= 2k gate",
       "target_area": [
         "apps/desktop/scripts/desktop-package-environment.mjs",
         "apps/desktop/scripts/electron-builder-config.mjs",
