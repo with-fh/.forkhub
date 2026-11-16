@@ -5,7 +5,7 @@ target_repo: github.com/deepseek-ai/deepseek-harness
 target_area: [apps/desktop/scripts/electron-builder-config.mjs, apps/desktop/src/forkVersion.ts, apps/desktop/src/ipc.ts, apps/desktop/src/main.ts, apps/desktop/src/preload-app.ts, apps/desktop/src/update-coordinator.ts, apps/desktop/src/updateFeed.ts, apps/desktop/tests/forkhub-fork-version.spec.ts, apps/desktop/tests/forkhub-update-feed.spec.ts, packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx, packages/client/ui-settings-general/src/client/desktop-feed-source.ts, packages/client/ui-settings-general/src/client/index.ts, packages/client/ui-settings-general/src/client/locales.ts, packages/client/ui-settings-general/src/types.ts, packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts]
 status: applied
 applied_upstream_pr: none
-version: 2
+version: 3
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -74,6 +74,13 @@ patch in this same catalog (`depends_on` this patch) — see
 - Realized against upstream tag `dsh-v0.2.2-rc.3` (`38a6a5c9`, latest);
   channel stack verified locally 2026-11-16 (9 channel suites green).
   280k stars (>= 2k gate).
+- v3: `applyForkHubFeed()` leaves the provider channel unset (null) and
+  the constructor applies select-then-feed order, so the GitHubProvider
+  loop falls back to the installed version's prerelease tag (`rc`) and
+  resolves the unified feed — verified live against the real Atom feed
+  (`nightly` pin found nothing: "No published versions on GitHub";
+  unset finds `v0.2.2-rc.3.with-fh.20261116.2`). Channel-file fallback
+  `rc-*.yml` → `latest-*.yml` covered by the converged unified release.
 - New `apps/desktop/src/updateFeed.ts`: feed constants, persisted-owner
   override, `getUpdateFeed()`, `normalizeUpdateOwner()`,
   `checkPublisherCatalog()` (injectable fetch), baked-default reader.
