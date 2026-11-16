@@ -121,6 +121,14 @@ Signed 2026-11-13 against v1.1.4 sources: AMO returned
 6. MIT attribution in-artifact: upstream zips ship NO license file, so
    `build.sh` injects the verbatim upstream LICENSE at zip root before
    signing (the MIT condition requires the notice in all copies).
+7. Auto-update feed (added 2026-11-16): `build.sh` stamps
+   `applications.gecko.update_url` at sign time (same signing-time
+   transform family as the ID swap — NOT part of `reference.diff`, which
+   stays one-hunk by design) and publishes cumulative `updates.json` +
+   stable latest-XPI alias to the `opendia-firefox-updates` release.
+   The UPDATE_TAG and asset names are STABLE forever — installed XPIs pin
+   the URL and have no other discovery mechanism. Pre-feed installs need
+   one manual reinstall; all builds after this self-update.
 
 ## Re-derivation instruction
 

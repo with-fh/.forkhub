@@ -15,6 +15,15 @@ REPO="${GITHUB_REPOSITORY:?}"
 TAG="${UPSTREAM_TAG:?}"
 LOG="$DIST/BUILD_LOG.md"
 ADDON_ID="{22b9fd82-342c-46ab-a615-888115ffc841}"
+# Auto-update feed (self-distributed/unlisted: AMO never serves updates for
+# install-from-file XPIs, so installed copies need update_url). Stable
+# release tag + asset names — NEVER rename the tag or installed copies lose
+# their update source (the installed update_url is the only discovery
+# mechanism; see INTENT.md).
+UPDATE_TAG="opendia-firefox-updates"
+UPDATE_URL="https://github.com/$REPO/releases/download/$UPDATE_TAG/updates.json"
+LATEST_XPI="opendia-firefox-latest-fh.xpi"
+STABLE_XPI_URL="https://github.com/$REPO/releases/download/$UPDATE_TAG/$LATEST_XPI"
 
 say() {
   printf '%s\n' "$*" | tee -a "$LOG"
@@ -46,13 +55,30 @@ case "$TAG" in
 esac
 
 # Provenance version: <upstream>-fh.<owner>.<n>, e.g. 1.1.4-fh.with-fh.1
+# NOTE: this target has NO updater (v<base>-fh...) releases (no publish.sh
+# hook), so N MUST count the namespaced bundle tags
+# ($SLUG-$UP-fhN) — the same counter the shared workflow uses for the
+# release it publishes into. Counting updater tags would pin N=1 forever
+# and every rebuild would re-submit the same AMO manifest version (409).
 OWNER=$(printf '%s' "$REPO" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
 VER=$(printf '%s' "$TAG" | sed 's/^v//')
-ESCAPED_BASE=$(printf '%s' "$VER" | sed 's/\./\\./g')
+SLUG=$(printf '%s' "${FORKHUB_TARGET:-github.com/aeonfun/opendia}" | awk -F/ '{print $(NF-1)"-"$NF}' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')
 EXISTING_TAGS=$(gh api "repos/$REPO/releases?per_page=100" --jq '.[].tag_name' 2>/dev/null) \
   || fail_soft "could not list releases to number the ForkHub build (gh api failed)"
-N=$(printf '%s\n' "$EXISTING_TAGS" | grep -cE "^v${ESCAPED_BASE}[-.]fh\\.${OWNER}\\.[0-9]+\$" || true)
+N=$(printf '%s\n' "$EXISTING_TAGS" | grep -cE "^${SLUG}-+${TAG}-fh[0-9]+\$" || true)
 N=$((N + 1))
+# force=true rebuilds reuse the SAME bundle number when the newest bundle
+# is incomplete — but AMO versions are unique per add-on ID, so the manifest
+# stamp must still advance. If the newest $SLUG-$UP-fhN bundle already
+# carries a signed XPI, N counts it and we move past it; if it does NOT
+# (failed sign), reuse would 409, so bump once more.
+if [ "$N" -gt 1 ]; then
+  NEWEST=$(printf '%s\n' "$EXISTING_TAGS" | grep -E "^${SLUG}-+${TAG}-fh[0-9]+\$" | sed -E 's/.*-fh([0-9]+)$/\1 \0/' | sort -n | tail -1 | awk '{print $2}')
+  if [ -n "${NEWEST:-}" ] && ! gh release view "$NEWEST" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null | grep -qE "\.xpi$"; then
+    say "newest bundle $NEWEST has no signed XPI (failed sign); reusing its number"
+    N=$((N - 1))
+  fi
+fi
 FORKHUB_VERSION="$VER-fh.$OWNER.$N"
 export FORKHUB_VERSION
 say "FORKHUB_VERSION=$FORKHUB_VERSION"
@@ -134,18 +160,32 @@ grep -q '"name": "OpenDia"' "$MANIFEST" \
 # Stamp <upstream>.<fhN> (e.g. 1.1.1 -> 1.1.1.4): valid toolkit version
 # format, sorts above the base but below any future upstream bump.
 # The mapping is recorded in PROVENANCE.md.
+#
+# --- update_url stamp (auto-update): unlisted/self-distributed XPIs get NO
+# AMO-served updates, so without this every install is frozen at its
+# install-time version. Stamp the catalog updates.json URL here (same
+# signing-time transform family as the ID swap — NOT part of
+# reference.diff, which stays one-hunk). Installed copies poll this URL
+# (~24h); Firefox refuses downgrades, and our STAMP_VER scheme only moves
+# forward within an add-on ID, so a newer updates.json can never push an
+# older XPI. Constraint: the UPDATE_TAG/UPDATE_URL constants above must be
+# STABLE forever — existing installs pin the URL baked into their XPI.
 UP_VER=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['version'])")
 STAMP_VER="$UP_VER.$N"
-python3 - "$MANIFEST" "$STAMP_VER" <<'EOF'
+python3 - "$MANIFEST" "$STAMP_VER" "$UPDATE_URL" <<'EOF'
 import json, sys
-p, v = sys.argv[1], sys.argv[2]
+p, v, u = sys.argv[1], sys.argv[2], sys.argv[3]
 m = json.load(open(p)); m['version'] = v
+g = m.setdefault('applications', {}).setdefault('gecko', {})
+g['update_url'] = u
 with open(p, 'w') as f:
     json.dump(m, f, indent=2)
     f.write('\n')
 EOF
 say "version stamped: $UP_VER -> $STAMP_VER"
+say "update_url stamped: $UPDATE_URL"
 grep -q "\"version\": \"$STAMP_VER\"" "$MANIFEST" || fail_soft "version stamp failed"
+grep -q "\"update_url\": \"$UPDATE_URL\"" "$MANIFEST" || fail_soft "update_url stamp failed"
 
 # --- MIT attribution: upstream zip ships NO license file; the MIT condition
 # requires the copyright + permission notice in all copies. Inject verbatim.
@@ -159,12 +199,24 @@ if ! unzip -l "$WORK/upstream.zip" | grep -qiE "LICENSE(\.txt|\.md)?$"; then
 fi
 
 # --- Lint gate (0 errors) ---
-if ! web-ext lint --source-dir "$WORK/src" 2>&1 | tee -a "$LOG" | grep -qE "errors +0"; then
-  say "web-ext lint output above did not confirm 0 errors"
+# NOTE on MANIFEST_UPDATE_URL: web-ext lint defaults to selfHosted=false,
+# so any gecko.update_url fires '"update_url" is not allowed' as an error.
+# But AMO's server runs the linter WITH --self-hosted for unlisted channel
+# submissions (addons-server run_addons_linter: `if channel ==
+# amo.CHANNEL_UNLISTED: args.append('--self-hosted')`), where the check is
+# skipped — and --self-hosted is exactly what this pipeline submits.
+# So the gate lints WITH --self-hosted for AMO parity: MANIFEST_UPDATE_URL
+# must be ABSENT here (proves the stamp landed), and any other error fails.
+LINT_OUT="$WORK/lint.txt"
+web-ext lint --source-dir "$WORK/src" --self-hosted 2>&1 | tee "$LINT_OUT" | tail -6 >> "$LOG"
+if grep -q "MANIFEST_UPDATE_URL" "$LINT_OUT"; then
+  fail_soft "MANIFEST_UPDATE_URL still flagged under --self-hosted — unexpected; refusing to submit"
 fi
-if web-ext lint --source-dir "$WORK/src" 2>&1 | grep -qE "errors +[1-9]"; then
-  fail_soft "web-ext lint reports errors; refusing to submit to AMO"
+if grep -qE "errors +[1-9]" "$LINT_OUT"; then
+  grep -B2 -A6 "ERRORS:" "$LINT_OUT" >> "$LOG" || true
+  fail_soft "web-ext lint (--self-hosted) reports errors; refusing to submit to AMO"
 fi
+say "lint gate passed (--self-hosted, 0 errors)"
 
 # --- Sign ---
 if [ -z "${AMO_JWT_ISSUER:-}" ] || [ -z "${AMO_JWT_SECRET:-}" ]; then
@@ -183,6 +235,69 @@ unzip -l "$SIGNED" | grep -q "META-INF/mozilla.sf" \
 # --- Ship ---
 OUT="opendia-firefox-$FORKHUB_VERSION.xpi"
 cp "$SIGNED" "$DIST/$OUT"
+# --- Update feed: cumulative updates.json + stable latest-XPI alias, both
+# published to the STABLE UPDATE_TAG release (created once, then --clobber
+# on every build). Installed copies poll updates.json (~24h per
+# extensions.update.interval); each entry carries a sha256 so a tampered
+# or truncated XPI is rejected client-side. Cumulative (append entry per
+# build, keep old ones) so any installed version finds its upgrade path.
+# NOTE: forkhub artifact releases are per-(tag,fhN) and non-monotonic
+# across upstream tags; the feed only ever advertises the newest build.
+OUT_SHA=$(sha256sum "$DIST/$OUT" | cut -d' ' -f1)
+FEED_ENTRY=$(mktemp)
+python3 - "$FEED_ENTRY" "$ADDON_ID" "$STAMP_VER" "$STABLE_XPI_URL" "$OUT_SHA" <<'EOF'
+import json, sys
+_, path, addon_id, version, link, sha = sys.argv
+try:
+    feed = json.load(open(path))
+except (FileNotFoundError, json.JSONDecodeError):
+    feed = {"addons": {}}
+entry = {"version": version, "update_link": link, "update_hash": "sha256:" + sha}
+updates = feed.setdefault("addons", {}).setdefault(addon_id, {}).setdefault("updates", [])
+updates[:] = [u for u in updates if u.get("version") != version] + [entry]
+with open(path, 'w') as f:
+    json.dump(feed, f, indent=2)
+    f.write('\n')
+EOF
+say "feed entry staged: $STAMP_VER -> $STABLE_XPI_URL (sha256:$OUT_SHA)"
+# Old entries are kept locally but the feed published here is rebuilt
+# below from the release's current updates.json, so it stays cumulative
+# across builds (each build only knows its own version).
+FEED_DL="$WORK/updates-remote.json"
+if gh release view "$UPDATE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+  gh release download "$UPDATE_TAG" --repo "$REPO" -p updates.json -O "$FEED_DL" 2>/dev/null || true
+fi
+if [ -f "$FEED_DL" ]; then
+  python3 - "$FEED_DL" "$FEED_ENTRY" <<'EOF'
+import json, sys
+remote_path, local_path = sys.argv[1], sys.argv[2]
+try:
+    remote = json.load(open(remote_path))
+except (FileNotFoundError, json.JSONDecodeError):
+    remote = {"addons": {}}
+local = json.load(open(local_path))
+for addon_id, obj in local.get("addons", {}).items():
+    r = remote.setdefault("addons", {}).setdefault(addon_id, {}).setdefault("updates", [])
+    seen = {u.get("version") for u in r}
+    r.extend(u for u in obj.get("updates", []) if u.get("version") not in seen)
+with open(local_path, 'w') as f:
+    json.dump(remote, f, indent=2)
+    f.write('\n')
+EOF
+fi
+cp "$FEED_ENTRY" "$DIST/updates.json"
+cp "$DIST/$OUT" "$DIST/$LATEST_XPI"
+UPLOAD_TAG="$UPDATE_TAG"
+if gh release view "$UPLOAD_TAG" --repo "$REPO" >/dev/null 2>&1; then
+  gh release upload "$UPLOAD_TAG" "$DIST/updates.json" "$DIST/$LATEST_XPI" --repo "$REPO" --clobber \
+    || say "warning: feed upload to $UPLOAD_TAG failed; bundle still ships"
+else
+  say "creating stable update-feed release $UPLOAD_TAG"
+  gh release create "$UPLOAD_TAG" "$DIST/updates.json" "$DIST/$LATEST_XPI" \
+    --repo "$REPO" --title "OpenDia Firefox auto-update feed (ForkHub)" \
+    --notes "STABLE release — do not delete. Installed copies poll updates.json (~24h) for new signed builds. Each entry carries a sha256. Cumulative: every signed build appends an entry." \
+    || say "warning: feed release creation failed; bundle still ships"
+fi
 # MIT attribution also OUTSIDE the artifact: release notes carry it even
 # if someone redistributes the bare .xpi without unpacking.
 {
@@ -198,12 +313,15 @@ cp "$SIGNED" "$DIST/$OUT"
   echo "- License: MIT, Copyright (c) 2025 Aeon Inc — full text inside"
   echo "  the .xpi (\`LICENSE\` at zip root) and at"
   echo "  https://github.com/aeonfun/opendia/blob/$TAG/LICENSE"
-  echo "- Transform: ONLY \`applications.gecko.id\` + version stamp:"
+  echo "- Transform: ONLY \`applications.gecko.id\`, \`version\`,"
+  echo "  \`update_url stamp (auto-update feed):\`"
   echo "  \`opendia@aaronjmars.com\` → \`$ADDON_ID\` (catalog-owned AMO"
   echo "  identity; the upstream ID is registered to the author's account"
   echo "  and 403s on our keys); version \`$UP_VER\` → \`$STAMP_VER\`"
-  echo "  (AMO versions are unique per add-on ID). Add-on name stays"
-  echo "  \`OpenDia\`; no code, UI, or permission change."
+  echo "  (AMO versions are unique per add-on ID); update_url →"
+  echo "  \`$UPDATE_URL\` (installed copies poll for new signed builds"
+  echo "  ~daily; feed published to stable \`$UPDATE_TAG\` release)."
+  echo "  Add-on name stays \`OpenDia\`; no code, UI, or permission change."
   echo "- Channel: unlisted (self-distributed via this catalog)"
   echo "- Install: \`about:addons\` → gear → Install Add-on From File"
   echo "- Sunset: when upstream ships a signed XPI (asset containing"
