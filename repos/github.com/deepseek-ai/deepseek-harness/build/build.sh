@@ -272,6 +272,37 @@ fi
 if [ -e "$DIST/forkhub/latest-mac.yml" ]; then
   cp "$DIST/forkhub/latest-mac.yml" "$DIST/forkhub/fh-mac.yml" || fail_soft "fh-mac.yml copy failed"
   say "fh-mac.yml emitted"
+else
+  # electron-builder writes win/linux updater manifests at build time but
+  # defers the mac manifest to publish time, which never runs for these
+  # unsigned fork packs — so an unsigned mac leg stages a dmg with no
+  # latest-mac.yml (seen on every rc.3 mac leg). Synthesize the pair from
+  # the staged dmg in the exact schema electron-updater consumes (same
+  # shape as the win/linux ymls: version, files[{url, sha512, size}],
+  # path, sha512, releaseDate). DMG has no blockmap sidecar, so no
+  # blockMapSize field. Without this the unified updater release ships
+  # no mac feed files and mac installs never see updates.
+  for dmg in "$DIST"/forkhub/*.dmg; do
+    [ -e "$dmg" ] || continue
+    DMG_NAME=$(basename "$dmg")
+    DMG_SIZE=$(wc -c < "$dmg" | tr -d ' ')
+    DMG_SHA512=$(sha512sum "$dmg" | awk '{print $1}' | xxd -r -p | base64 -w0)
+    DMG_DATE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    for yml in latest-mac.yml fh-mac.yml; do
+      cat > "$DIST/forkhub/$yml" <<YML || fail_soft "$yml write failed"
+version: $FH_VERSION
+files:
+  - url: $DMG_NAME
+    sha512: $DMG_SHA512
+    size: $DMG_SIZE
+path: $DMG_NAME
+sha512: $DMG_SHA512
+releaseDate: '$DMG_DATE'
+YML
+    done
+    say "synthesized $DMG_NAME updater manifests (latest-mac.yml + fh-mac.yml)"
+    break
+  done
 fi
 if [ -e "$DIST/forkhub/latest.yml" ]; then
   cp "$DIST/forkhub/latest.yml" "$DIST/forkhub/fh.yml" || fail_soft "fh.yml copy failed"
