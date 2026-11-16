@@ -261,12 +261,15 @@ index 6b4e9896..5aaf8d75 100644
          get: () => ipcRenderer.invoke(DESKTOP_IPC.updatesChannelGet) as Promise<DesktopChannelState>,
          set: channel => ipcRenderer.invoke(DESKTOP_IPC.updatesChannelSet, channel) as Promise<DesktopChannelChangeResult>,
 diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
-index 475a5606..f71d124a 100644
+index 475a5606..45a7f1c3 100644
 --- a/apps/desktop/src/update-coordinator.ts
 +++ b/apps/desktop/src/update-coordinator.ts
-@@ -6,6 +6,8 @@ import { app } from 'electron'
+@@ -4,8 +4,10 @@ import { existsSync } from 'node:fs'
+ import { join } from 'node:path'
+ import { app } from 'electron'
  import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo, type UpdateCheckResult } from 'electron-updater'
- import { gt, valid } from 'semver'
+-import { gt, valid } from 'semver'
++import { gt, prerelease, valid } from 'semver'
  import type { DesktopUpdateState } from './ipc.ts'
 +import { getUpdateFeed, type FeedReader } from './updateFeed.ts'
 +import { isForkCounterUpgrade, parseForkVersion } from './forkVersion.ts'
@@ -289,7 +292,7 @@ index 475a5606..f71d124a 100644
      this.updater.on('download-progress', this.onProgress)
      this.updater.on('update-downloaded', this.onDownloaded)
      this.updater.on('error', this.onError)
-@@ -87,6 +91,36 @@ export class DesktopUpdateCoordinator {
+@@ -87,6 +91,48 @@ export class DesktopUpdateCoordinator {
    /** Latest observable state; complete download identity remains main-process-owned. */
    get state(): DesktopUpdateState { return this.current }
  
@@ -303,16 +306,17 @@ index 475a5606..f71d124a 100644
 +   * the version gate. Upstream has no `.forkhub` repo, so a stock build's
 +   * feed can never serve a fork build.
 +   *
-+   * The provider channel is left unset (null): electron-updater's
-+   * GitHubProvider then falls back to the installed version's own
-+   * prerelease tag (`rc` for rc-based fork builds, e.g.
-+   * `0.2.2-rc.3.with-fh.<date>.<n>`), which is exactly what the unified
-+   * feed serves. Pinning `updater.channel` to `nightly`/`stable` here
-+   * would make the provider loop look for `nightly`-tagged releases that
-+   * never exist and fail every check with "No published versions on
-+   * GitHub". Channel-file resolution still works: the provider tries
-+   * `<prerelease>-<platform>.yml` first (`rc-linux.yml`), then falls back
-+   * to `latest-<platform>.yml`, which the unified release carries.
++   * The provider channel tracks the fork tags' own prerelease channel
++   * (e.g. `rc` for `0.2.2-rc.3.with-fh.<date>.<n>`): electron-updater's
++   * GitHubProvider loop only accepts a release whose prerelease tag
++   * matches the updater channel, and the unified feed serves exactly
++   * those tags. Leaving `nightly`/`stable` pinned here makes the loop
++   * look for releases that never exist and fail every check with
++   * "No published versions on GitHub". Channel-file resolution still
++   * works: the provider tries `<prerelease>-<platform>.yml` first
++   * (`rc-linux.yml`), then falls back to `latest-<platform>.yml`, which
++   * the unified release carries. Stock installs keep the selected
++   * channel (upstream behavior unchanged).
 +   */
 +  applyForkHubFeed(): void {
 +    const feed = getUpdateFeed(this.feedReader)
@@ -320,13 +324,24 @@ index 475a5606..f71d124a 100644
 +      this.updater.setFeedURL({ provider: 'github', owner: feed.owner, repo: feed.repo })
 +    }
 +    this.updater.allowPrerelease = true
-+    this.updater.channel = null
++    // Point the provider loop at the fork tags' own prerelease channel
++    // (e.g. `rc` for `0.2.2-rc.3.with-fh.<date>.<n>`): the loop only
++    // accepts a release whose prerelease tag matches the updater channel,
++    // and the unified feed serves exactly those tags. Stock installs keep
++    // the selected channel (upstream behavior unchanged). The setter
++    // rejects null, so a missing fork tag falls back to the selected
++    // channel instead of crashing.
++    const fork = parseForkVersion(this.currentVersion())
++    const forkChannel = fork === null ? null : prerelease(fork.base)?.[0]
++    if (typeof forkChannel === 'string' && forkChannel.length > 0) {
++      this.updater.channel = forkChannel
++    }
 +  }
 +
    /** Reason ordinary updates are suspended, independently of the last operation result. */
    get configurationFailure(): 'startup' | 'cleanup' | undefined { return this.configurationError }
  
-@@ -137,6 +171,7 @@ export class DesktopUpdateCoordinator {
+@@ -137,6 +183,7 @@ export class DesktopUpdateCoordinator {
        }
        this.channel = channel
        selectUpdateChannel(this.updater, channel)
@@ -334,7 +349,7 @@ index 475a5606..f71d124a 100644
        this.configurationError = undefined
        this.setState({ phase: 'checking' })
        const result = await this.doCheck()
-@@ -276,7 +311,14 @@ export class DesktopUpdateCoordinator {
+@@ -276,7 +323,14 @@ export class DesktopUpdateCoordinator {
        this.cancellation = result.cancellationToken
        const version = result.updateInfo.version
        if (valid(version) === null) throw new Error('desktop update: feed version is invalid')
@@ -593,30 +608,16 @@ index 00000000..2b6cb62e
 +  })
 +})
 diff --git a/apps/desktop/tests/update-coordinator.spec.ts b/apps/desktop/tests/update-coordinator.spec.ts
-index b65f825b..8ebfa786 100644
+index b65f825b..8074438b 100644
 --- a/apps/desktop/tests/update-coordinator.spec.ts
 +++ b/apps/desktop/tests/update-coordinator.spec.ts
-@@ -145,7 +145,7 @@ describe('desktop update coordinator', () => {
-       'available', 'downloading', 'downloading', 'verifying', 'ready', 'installing',
-     ])
-     expect(f.updater).toMatchObject({
--      autoDownload: false, autoInstallOnAppQuit: false, channel: 'nightly',
-+      autoDownload: false, autoInstallOnAppQuit: false, channel: null,
-       allowPrerelease: true, allowDowngrade: false,
-     })
-   })
-@@ -246,16 +246,39 @@ it.each([new DesktopUpdatePreparationError('stop-failed', 'private diagnostic'),
+@@ -246,16 +246,47 @@ it.each([new DesktopUpdatePreparationError('stop-failed', 'private diagnostic'),
  
  it.each(['nightly', 'stable'] as const)('accepts newer prereleases on the selected %s channel', async (channel) => {
    const f = fixture(channel, '1.0.0')
--  expect(f.updater.channel).toBe(channel)
-+  // ForkHub feed: the provider channel stays unset so electron-updater's
-+  // GitHubProvider falls back to the installed version's own prerelease
-+  // tag (e.g. `rc`); pinning `nightly`/`stable` here makes the provider
-+  // loop look for releases that never exist ("No published versions on
-+  // GitHub"). The DESKTOP channel selection is tracked on the
-+  // coordinator, not the provider.
-+  expect(f.updater.channel).toBeNull()
++  // Stock install: the provider channel keeps the selected channel
++  // (upstream behavior unchanged — only fork builds retarget it).
+   expect(f.updater.channel).toBe(channel)
 +  expect(f.coordinator.selectedChannel).toBe(channel)
 +  // ForkHub feed: prereleases stay allowed on every channel (the feed
 +  // holds ONLY fork builds); the fork-counter gate in doCheck(), not the
@@ -626,22 +627,33 @@ index b65f825b..8ebfa786 100644
    for (const version of ['1.1.0-alpha.1', '1.1.0-rc.2', '1.1.0']) {
      f.checkForUpdates.mockResolvedValueOnce({ isUpdateAvailable: true, updateInfo: { version } })
      expect(await f.coordinator.check()).toMatchObject({ phase: 'available', version })
--    expect(f.updater.channel).toBe(channel)
-+    expect(f.updater.channel).toBeNull()
+     expect(f.updater.channel).toBe(channel)
 +    expect(f.coordinator.selectedChannel).toBe(channel)
    }
  })
  
-+it.each(['nightly', 'stable'] as const)('keeps the provider channel unset after switching to %s', async (channel) => {
++it.each(['nightly', 'stable'] as const)('retargets the provider channel at the fork tags on %s', async (channel) => {
++  // Fork install: the provider loop only accepts releases whose
++  // prerelease tag matches the updater channel, so the coordinator points
++  // it at the fork base prerelease (`rc`) — the unified feed serves
++  // exactly those tags. Pinning `nightly`/`stable` fails every check with
++  // "No published versions on GitHub" (verified live against the feed).
 +  const from = channel === 'nightly' ? 'stable' : 'nightly'
 +  const f = fixture(from, '0.2.2-rc.3.with-fh.20261116.1')
++  expect(f.updater.channel).toBe('rc')
 +  const save = vi.fn(async () => {})
 +  f.checkForUpdates.mockResolvedValueOnce({ isUpdateAvailable: false, updateInfo: { version: '0.2.2-rc.3.with-fh.20261116.1' } })
 +  await f.coordinator.switchChannel(channel, save)
 +  expect(save).toHaveBeenCalledOnce()
 +  expect(f.coordinator.selectedChannel).toBe(channel)
-+  expect(f.updater.channel).toBeNull()
++  expect(f.updater.channel).toBe('rc')
 +  expect(f.updater.allowPrerelease).toBe(true)
++})
++
++it.each(['nightly', 'stable'] as const)('keeps the selected provider channel on stock %s', async (channel) => {
++  const f = fixture(channel, '1.0.0')
++  expect(f.updater.channel).toBe(channel)
++  expect(f.coordinator.selectedChannel).toBe(channel)
 +})
 +
  it.each(['nightly', 'stable'] as const)('rejects older, equal and malformed versions on %s', async (channel) => {
