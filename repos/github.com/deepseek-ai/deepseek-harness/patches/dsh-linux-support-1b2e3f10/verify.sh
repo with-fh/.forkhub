@@ -1,5 +1,5 @@
 #!/bin/sh
-# Verify gate for dsh-linux-support (the ImBIOS Linux patch).
+# Verify gate for dsh-linux-support (the in-catalog Linux patch).
 # Runs in the DeepSeek Harness checkout with the with-fh channel patch
 # applied first (see manifest depends_on), then layers this patch.
 # Focused suites only — full CI stays upstream's job.

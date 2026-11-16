@@ -13,11 +13,11 @@ owners: [Imamuzzaki Abu Salam]
 source_url: null
 imported_at: null
 created: 2026-11-06
-last_realized_against_commit: ddac96760b6e0df8fa0fe17cbdcf0b512f4c12b2c
-realized_against_tag: dsh-v0.2.2-rc.2
+last_realized_against_commit: 38a6a5c965aa99ab525161efb7cc5cf1fe62fced
+realized_against_tag: dsh-v0.2.2-rc.3
 verifies_with: vitest run (focused suites, see verify.sh)
-upstream_stars: 279830
-star_gate: ">=2000 PASS (279830 recorded 2026-11-13)"
+upstream_stars: 280830
+star_gate: ">=2000 PASS (280830 recorded 2026-11-16)"
 depends_on_note: "Applies ONLY on top of with-fh/.forkhub dsh-forkhub-support-0qjj6stm (see manifest depends_on) — never on stock."
 ---
 
@@ -29,9 +29,9 @@ stock. Together they reproduce the upstream mac/Windows behavior on
 Linux, with one addition: per-publisher credit that follows the update
 publisher dynamically.
 
-Realized 2026-11-13 against upstream `dsh-v0.2.2-rc.1` (`66491b05`); re-derived onto `dsh-v0.2.2-rc.2` (`ddac9676`, latest)
-layered on the with-fh channel realization (`3bc80970` in derivation
-terms = `dsh-forkhub-support-0qjj6stm` @ with-fh `43bf67a`): 329/329
+Realized 2026-11-13 against upstream `dsh-v0.2.2-rc.1` (`66491b05`); re-derived onto `dsh-v0.2.2-rc.3` (`38a6a5c9`, latest)
+layered on the with-fh channel realization
+(`dsh-forkhub-support-0qjj6stm` @ with-fh `00dee78`): 329/329
 focused tests green (9 new linux suites (incl. package-selection linux routing) + 320+ gate/spec suites on the
 layered tree).
 
@@ -58,8 +58,9 @@ layered tree).
 3. **Per-publisher credit (dynamic).** `DesktopFeedRow` shows
    "Maintained by {owner}" linking to
    `https://github.com/{owner}/.forkhub` whenever the live feed owner
-   is neither `with-fh` nor empty — i.e. ImBIOS Linux installs credit
-   ImBIOS, with-fh installs stay unbranded default. No hardcoded
+   is neither `with-fh` nor empty — e.g. a downstream publisher's
+   Linux install credits that publisher, with-fh installs stay
+   unbranded default. No hardcoded
    maintainer strings; locale key `desktop.feed.maintainedBy` in all 8
    dicts (repo dicts are `satisfies Record<keyof typeof en>`).
 4. **Open-at-login.** New `src/linuxAutostart.ts` (XDG

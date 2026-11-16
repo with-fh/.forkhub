@@ -5,7 +5,7 @@ target_repo: github.com/deepseek-ai/deepseek-harness
 target_area: [apps/desktop/scripts/electron-builder-config.mjs, apps/desktop/src/forkVersion.ts, apps/desktop/src/ipc.ts, apps/desktop/src/main.ts, apps/desktop/src/preload-app.ts, apps/desktop/src/update-coordinator.ts, apps/desktop/src/updateFeed.ts, apps/desktop/tests/forkhub-fork-version.spec.ts, apps/desktop/tests/forkhub-update-feed.spec.ts, packages/client/ui-settings-general/src/client/DesktopFeedRow.tsx, packages/client/ui-settings-general/src/client/desktop-feed-source.ts, packages/client/ui-settings-general/src/client/index.ts, packages/client/ui-settings-general/src/client/locales.ts, packages/client/ui-settings-general/src/types.ts, packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts]
 status: applied
 applied_upstream_pr: none
-version: 1
+version: 2
 license: MIT
 author: Imamuzzaki Abu Salam
 last_modified_by: Imamuzzaki Abu Salam
@@ -13,8 +13,8 @@ owners: [Imamuzzaki Abu Salam]
 source_url: null
 imported_at: null
 created: 2026-11-10
-last_realized_against_commit: ddac96760b6e0df8fa0fe17cbdcf0b512f4c12b2c
-realized_against_tag: dsh-v0.2.2-rc.2
+last_realized_against_commit: 38a6a5c965aa99ab525161efb7cc5cf1fe62fced
+realized_against_tag: dsh-v0.2.2-rc.3
 verifies_with: bun test
 ---
 
@@ -31,8 +31,9 @@ ForkHub-support patch repoints the feed at the fork's own catalog
 (`with-fh/.forkhub`), with the update publisher selectable per install and
 fork rebuilds visibly separated from stock. Linux specifics (dock identity,
 AppImage/deb packaging, node-pty linux-x64 prebuilds, open-at-login entry,
-per-publisher credit) are a separate downstream concern in ImBIOS
-`dsh-linux-support` (`depends_on` this patch) — same split as Natively.
+per-publisher credit) live in the companion `dsh-linux-support`
+patch in this same catalog (`depends_on` this patch) — see
+`manifest.json:apply_order`.
 
 ## Non-negotiables
 
@@ -63,14 +64,16 @@ per-publisher credit) are a separate downstream concern in ImBIOS
 5. **No Linux hunks in this diff.** No AppImage, deb hook, WM_CLASS /
    desktop-entry, node-pty prebuild changes (grep for linuxAutostart
    equivalents, AppImage, deb hook, WM_CLASS is empty) — those belong to
-   ImBIOS `.forkhub` `dsh-linux-support`.
+   the `dsh-linux-support` patch in this same catalog
+   (`manifest.json:apply_order`).
 6. **No repo-wide test/typecheck runs.** Verify with the focused suites
    in `verify.sh` only.
 
 ## Implementation notes
 
-- Realized against upstream tag `dsh-v0.2.2-rc.1` (`66491b0`, the tag the catalog builds);
-  277k stars (>= 2k gate).
+- Realized against upstream tag `dsh-v0.2.2-rc.3` (`38a6a5c9`, latest);
+  channel stack verified locally 2026-11-16 (9 channel suites green).
+  280k stars (>= 2k gate).
 - New `apps/desktop/src/updateFeed.ts`: feed constants, persisted-owner
   override, `getUpdateFeed()`, `normalizeUpdateOwner()`,
   `checkPublisherCatalog()` (injectable fetch), baked-default reader.

@@ -36,7 +36,7 @@ Windows ("More info → Run anyway").
 
 | leg | artifacts |
 |---|---|
-| mac (`macos-26`, unsigned) | `*.dmg` + `*.zip` (arm64 + x64), `latest-mac.yml` + `fh-mac.yml` |
+| mac (`macos-26`, unsigned) | `*-arm64.dmg` (x64 cross-pack best-effort; arm64 always ships), `latest-mac.yml` + `fh-mac.yml` when the leg emits manifests |
 | win (`windows-latest`, unsigned) | unsigned `*.exe`, `latest.yml` + `fh.yml` |
 | linux (`ubuntu-24.04`, unsigned) | unsigned `*.AppImage`, `latest-linux.yml` + `fh-linux.yml` |
 
@@ -67,7 +67,8 @@ Every leg also emits `*.blockmap` sidecars (differential updates).
 
 Upstream tags are `dsh-vX.Y.Z-*` (e.g. `dsh-v0.2.2-rc.1`) and ALL
 current upstream releases are prereleases with zero assets. The workflow
-tag pool is `refs/tags/v*`, so `upstream.json:tag_match_pattern` is
+tag pool is the per-target `tag_pool_prefix` (`dsh-v` for this target),
+so `upstream.json:tag_match_pattern` is
 `^dsh-v[0-9]+\.[0-9]+\.[0-9]+-` to admit them. This catalog's channel tags
 are its own `v<base>.<owner>.<date>.<n>` unified updater tags, so the
 registry `tagMatch` (`^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+\.<owner>\.[0-9]{8}\.[0-9]+$`
@@ -76,12 +77,12 @@ namespaced bundle tags.
 
 ## Linux (in-catalog since dsh-linux-support port)
 
-The `dsh-linux-support-1b2e3f10` patch (ported from ImBIOS/.forkhub
-PR #5, CI-green there as `v0.2.2-rc.3.imbios.20261114.1`) adds the
+The `dsh-linux-support-1b2e3f10` patch adds the
 `linux-x64` target (AppImage, XDG desktop-entry/WM_CLASS contract,
 node-pty `prebuilds/linux-x64`, XDG autostart, per-publisher credit)
 on top of the channel patch via this manifest's `apply_order` —
-same channel+linux layering as Natively, now in one catalog. The
+the unified updater release carries the Linux AppImage +
+`latest-linux.yml`/`fh-linux.yml`. The
 linux leg runs on `ubuntu-24.04` (Electron 44 smoke SIGSEGVs on
 26.04; node 24; `xvfb-run` + `ELECTRON_DISABLE_SANDBOX=1` for the
 headless smoke).
