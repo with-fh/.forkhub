@@ -6,8 +6,12 @@
 set -eu
 HERE=$(dirname "$0")
 
-# No channel drift: the linux patch never touches feed/updater defaults.
-if grep -E '^[+-].*(setFeedURL|allowPrerelease|getUpdateFeed|forkhubUpdateOwner)' "$HERE/reference.diff" | grep -qv 'openAtLogin'; then
+# No channel drift: the linux patch never touches feed/updater defaults
+# in production code. Test-only hermetic fixes under the channel spec
+# (apps/desktop/tests/forkhub-update-feed.spec.ts — clearing ambient
+# DSH_UPDATE_OWNER) are exempt: they pin the spec's environment, not the
+# shipped feed behavior.
+if awk '/^diff --git/{file=$0} /^[+-].*(setFeedURL|allowPrerelease|getUpdateFeed|forkhubUpdateOwner)/ && file !~ /forkhub-update-feed\.spec\.ts/ {print}' "$HERE/reference.diff" | grep -qv 'openAtLogin'; then
   echo "FAIL: linux patch must not touch channel defaults" >&2
   exit 1
 fi
