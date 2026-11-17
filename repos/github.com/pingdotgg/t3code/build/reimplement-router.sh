@@ -62,13 +62,18 @@ jq --arg id "$ID" --arg v "$NEW_VERSION" \
 mv "$MANIFEST.tmp" "$MANIFEST"
 
 REALIZED_SHA=$(git -C "$WORK" rev-parse --short "$TAG^{}" 2>/dev/null || printf '%s' "$TAG")
-jq --arg id "$ID" --arg sha "$REALIZED_SHA" \
-  '.patches[$id].last_realized_against_commit = $sha' \
+jq --arg id "$ID" --arg sha "$REALIZED_SHA" --arg tag "$TAG" \
+  '.patches[$id].last_realized_against_commit = $sha | .patches[$id].last_realized_against_tag = $tag' \
   "$MANIFEST" > "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
 
 sed -i "1,/^---$/ s/^version: .*/version: $NEW_VERSION/" "$PATCH/INTENT.md"
 sed -i "1,/^---$/ s/^last_realized_against_commit: .*/last_realized_against_commit: $REALIZED_SHA/" "$PATCH/INTENT.md"
+if grep -q "^realized_against_tag:" "$PATCH/INTENT.md"; then
+  sed -i "1,/^---$/ s/^realized_against_tag: .*/realized_against_tag: $TAG/" "$PATCH/INTENT.md"
+else
+  awk -v tag="$TAG" 'BEGIN{c=0} /^-{3}$/{c++} c==1 && /^last_realized_against_commit: /{print; print "realized_against_tag: " tag; next} {print}' "$PATCH/INTENT.md" > "$PATCH/INTENT.md.tmp" && mv "$PATCH/INTENT.md.tmp" "$PATCH/INTENT.md"
+fi
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ATTEMPT_N=$(($(wc -l < "$PATCH/attempts.jsonl" 2>/dev/null || echo 0) + 1))
