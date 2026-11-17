@@ -7,13 +7,10 @@
 # One workflow leg per OS (see upstream.json:build_runs_on): each leg packs
 # its NATIVE installers and uploads them into the SAME shared updater +
 # bundle releases (per-OS skip markers make legs resume independently;
-# FORKHUB_OS_MARKER reuse keeps one release number). NOTE for this
-# target: upstream.json runs mac + win only — the `linux)` case arms
-# below are dormant here (kept: this script is shared shape across
-# targets; no Linux leg runs for Natively in this catalog (the `linux)`
-# case arms below are dormant here — this script keeps the shared shape
-# across targets. Linux installers are not currently published; a
-# companion natively-linux-support patch is tracked as follow-up work).
+# FORKHUB_OS_MARKER reuse keeps one release number). The `linux)` leg is
+# live: natively-linux-support-9d3f7a21 (ported from the deleted
+# ImBIOS catalog) provides the dock identity, system-audio backend,
+# XDG autostart, and per-publisher credit the Linux AppImage + deb need.
 #
 # The shared builder image only guarantees bun (+ node/cargo on GHA
 # runners). This target brings its own toolchain (node 22 to match

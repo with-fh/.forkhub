@@ -1,18 +1,17 @@
-# Build — github.com/natively-ai-assistant/natively-cluely-ai-assistant (ForkHub, mac + win)
+# Build — github.com/natively-ai-assistant/natively-cluely-ai-assistant (ForkHub, mac + win + linux)
 
 Repo-native build for the ForkHub Natively channel. Runs one workflow leg
-per OS (`upstream.json:build_runs_on`: `macos-26`, `windows-latest`)
+per OS (`upstream.json:build_runs_on`: `macos-26`, `windows-latest`, `ubuntu-24.04`)
 after the intent stack is applied and `verify.sh` passes. The catalog
 follows upstream **stable** (newest lowercase-`v` tag; see the tag note
 below). Each build carries a ForkHub provenance version
 `<upstream>-fh.<owner>.<n>` (e.g. `2.8.1-fh.with-fh.1`).
 
-No Linux leg runs for this target: Linux installers (AppImage + deb)
-are not currently published from this catalog. A companion
-`natively-linux-support` patch (linux desktop target, dock identity,
-open-at-login entry, system-audio backend, deb hook, per-publisher
-About credit, layered on this patch via `depends_on`) is tracked as
-follow-up work — until it lands, Linux users stay on upstream builds.
+The Linux leg is live: `natively-linux-support-9d3f7a21` (ported from
+the deleted ImBIOS catalog, same patch id) layers over the channel
+patch and provides the dock identity, open-at-login entry,
+system-audio backend, deb hook, and per-publisher About credit the
+Linux installers need.
 
 ## What each leg builds (mirror of official, unsigned)
 
@@ -23,6 +22,7 @@ Official Natively ships mac (dmg + zip, arm64 + x64, signed) and Windows
 |---|---|
 | mac (`macos-26`, unsigned) | `Natively-*.dmg` + `Natively-*.zip` (arm64 + x64), `latest-mac.yml` + `fh-mac.yml` |
 | win (`windows-latest`, unsigned) | `Natively-Setup-*.exe` (nsis) + portable `*.exe`, `latest.yml` + `fh.yml` |
+| linux (`ubuntu-24.04`, unsigned) | `Natively-*.AppImage` + `Natively-*.deb`, `latest-linux.yml` + `fh-linux.yml` |
 
 Every leg also emits `*.blockmap` sidecars (differential updates) and a
 per-OS `SHA256SUMS-<os>` (a single shared `SHA256SUMS` would be clobbered
@@ -109,9 +109,7 @@ deb, checksums, build log, notes).
 - **Premium submodule stays absent.** Fork builds ship open-source mode
   (`electron/premium/featureGate.ts`); the patch's `HardwareId` fallback
   chain is what makes trial/licensing work without it.
-- **No Linux leg.** The shared workflow fans out only over
-  `upstream.json:build_runs_on` (mac + win for this target), so no Linux
-  artifacts publish from this catalog. The planned Linux surface (dock
-  identity, open-at-login entry, system-audio backend, deb hook, and
-  per-publisher About credit, as a `natively-linux-support` patch with
-  `depends_on` this patch) is follow-up work, not yet realized.
+- **Linux leg.** The shared workflow fans out over
+  `upstream.json:build_runs_on` (mac + win + linux for this target);
+  the linux leg publishes the AppImage + deb into the same unified
+  updater release (linux skip marker: `*.AppImage`).
