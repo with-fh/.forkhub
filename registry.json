@@ -22,19 +22,22 @@
     },
     "natively": {
       "target": "github.com/Natively-AI-assistant/natively-cluely-ai-assistant",
-      "description": "Natively x ForkHub update channel for Windows (macOS via the in-app updater for now; no Linux leg runs in this catalog yet)",
+      "description": "Natively x ForkHub update channel for Windows + macOS + Linux (unified updater releases; 3k-star upstream)",
       "bin": "Natively",
       "defaultChannel": "stable",
       "asset": "Natively.{version}.exe",
       "assets": {
-        "win32-x64": "Natively.{version}.exe"
+        "win32-x64": "Natively.{version}.exe",
+        "linux-x64": "Natively-{version}.AppImage"
       },
       "binPaths": {
-        "win32-x64": "{asset}"
+        "win32-x64": "{asset}",
+        "linux-x64": "{asset}"
       },
       "extract": "none",
       "platforms": [
-        "win32-x64"
+        "win32-x64",
+        "linux-x64"
       ],
       "channels": {
         "stable": {

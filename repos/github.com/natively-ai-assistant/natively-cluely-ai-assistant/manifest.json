@@ -15,12 +15,25 @@
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "natively/forkhub-support",
       "last_realized_against_commit": "cdc6995"
+    },
+    "natively-linux-support-9d3f7a21": {
+      "status": "draft",
+      "version": "1.0.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "natively/linux-support",
+      "last_realized_against_commit": "cdc6995",
+      "last_realized_against_tag": "v3.0.0",
+      "note": "Ported from deleted ImBIOS/.forkhub (same patch id, reference.diff byte-identical); pending realization against current with-fh channel tree + verify.sh green, then linux leg enable.",
+      "depends_on_note": "Applies ONLY on top of natively-forkhub-support-f276ae13 in this same manifest (apply_order) - never on stock."
     }
   },
   "apply_order": [
-    "natively-forkhub-support-f276ae13"
+    "natively-forkhub-support-f276ae13",
+    "natively-linux-support-9d3f7a21"
   ],
   "slug_aliases": {
-    "natively-forkhub-support": "natively-forkhub-support-f276ae13"
+    "natively-forkhub-support": "natively-forkhub-support-f276ae13",
+    "natively-linux-support": "natively-linux-support-9d3f7a21"
   }
 }

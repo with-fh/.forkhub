@@ -1,7 +1,7 @@
 # Acceptance Criteria — natively-forkhub-support-f276ae13
 
 The ForkHub update-channel patch for Natively (v2.0.0: Linux hunks
-moved out into a follow-up `natively-linux-support` patch — no behavior
+moved out into `natively-linux-support-9d3f7a21` — no behavior
 change to the channel itself).
 
 ## Must pass for promotion to APPLIED

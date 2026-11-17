@@ -25,12 +25,12 @@ It squashes the four original intents (update-track, fork-ux-and-checks,
 publisher-input, fork calendar) with no behavior change — one patch
 per software, as the catalog intends.
 
-This patch is the ForkHub UPDATE CHANNEL. It is the only patch in
-`with-fh/.forkhub` for this target, and the `with-fh` build itself must
-stay functional with this patch alone. Linux support (a companion
-`natively-linux-support` patch with `depends_on` this patch) is tracked
-as follow-up work — until it lands, no Linux leg runs and no Linux
-installers publish from this catalog.
+This patch is the ForkHub UPDATE CHANNEL, and the `with-fh` build
+itself must stay functional with this patch alone. Linux support
+(`natively-linux-support-9d3f7a21`, ported from the deleted ImBIOS
+catalog, `depends_on` this patch) provides the dock identity,
+system-audio backend, XDG autostart, deb hook, and per-publisher
+About credit the Linux leg needs.
 
 1. **Catalog update feed.** The app's electron-updater feed,
    release-notes lookup, and manual-download links follow the ForkHub
@@ -64,7 +64,7 @@ installers publish from this catalog.
    and they cannot move downstream without regressing the `with-fh`
    build. Branding/credit (About maintainer card) is intentionally NOT
    here: credit follows the update publisher dynamically and belongs in
-   the follow-up Linux-support patch.
+   the Linux-support patch (`natively-linux-support-9d3f7a21`).
 
 ## Why
 
@@ -125,12 +125,11 @@ downstream concern.
    on fork feeds, direct asset link only where names are predictable).
 9. **No repo-wide test/typecheck runs.** Verify with the focused
    suites in `verify.sh` only.
-10. **Linux hunks live in follow-up work.** This patch never touches
-    `linuxAutostart`, speaker backends, `linux.desktop`, the deb hook,
-    the Linux dock block in `main.ts`, or the About credit — those
-    belong to a follow-up `natively-linux-support` patch. The
-    `with-fh` legs do not ship Linux features (no Linux leg runs
-    against this catalog build release flow for Natively).
+10. **Linux hunks live in natively-linux-support.** This patch never
+    touches `linuxAutostart`, speaker backends, `linux.desktop`, the
+    deb hook, the Linux dock block in `main.ts`, or the About credit
+    — those belong to `natively-linux-support-9d3f7a21` (ported from
+    the deleted ImBIOS catalog, `depends_on` this patch).
 
 ## Implementation notes
 
@@ -141,9 +140,9 @@ downstream concern.
   calls 400 at Google, verified live 2026-10-26).
 - v2.0.0 is a scope redefinition (MAJOR): the Linux hunks (dock
   identity, system-audio backend, open-at-login entry, deb hook,
-  per-publisher About credit) move out of this patch into a follow-up
-  `natively-linux-support` patch (not yet realized — no Linux leg runs
-  and no Linux installers publish until it lands).
+  per-publisher About credit) move out of this patch into
+  `natively-linux-support-9d3f7a21` (ported 2026-11-17 from the
+  deleted ImBIOS catalog; draft pending realization).
 - New `electron/update/updateFeed.ts`: feed constants, persisted-owner
   override (`forkhub-updater.json` in userData), `getUpdateFeed()`,
   `normalizeUpdateOwner()`, `checkPublisherCatalog()` (injectable
@@ -183,11 +182,8 @@ downstream concern.
   premium present).
 - Linux CI lives beside the patch (`../build/build.sh`, `publish.sh`,
   `BUILD.md`, `CONSUME.md`, `triggers.md`, `../upstream.json`): per-OS
-  legs (mac dmg+zip unsigned, win nsis+portable unsigned) into one
-  shared updater release. The `with-fh` build does NOT run a Linux leg
-  for Natively (no `ubuntu-latest` entry for this target's release
-  flow); no Linux installers publish until the follow-up
-  `natively-linux-support` patch lands.
+  legs (mac dmg+zip unsigned, win nsis+portable unsigned, linux
+  AppImage+deb unsigned) into one shared updater release.
 - Tests: `updateFeed` + `updatePublisher` + `ReleaseNotesManager` +
   `HardwareId` + `CalendarPkce` + `ForkPatch2Sources` focused suites;
   `windowsTaskbarPolicy.test.mjs` (upstream-owned, unmodified) runs as
