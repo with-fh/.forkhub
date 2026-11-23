@@ -23,8 +23,8 @@
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "dsh/forkhub-support",
-      "last_realized_against_commit": "38a6a5c965aa99ab525161efb7cc5cf1fe62fced",
-      "note": "Realized against upstream dsh-v0.2.2-rc.3 (38a6a5c9); channel stack verified locally 2026-11-16 (9 channel suites green). v4: provider channel tracks the fork base prerelease tag (v3 null crashed the setter; proven by .3 launch log). 280k stars >= 2k gate",
+      "last_realized_against_commit": "9c2670d3bce5275e0d1610272958121af87787bb",
+      "note": "Clean-room verified against upstream dsh-v0.2.2-rc.5 (9c2670d3): pristine clone -> catalog diffs apply clean (check exit 0) -> verify.sh 202/202 green; combined layered diff re-applies on fresh rc.5 checkout.",
       "target_area": [
         "apps/desktop/scripts/desktop-package-environment.mjs",
         "apps/desktop/scripts/electron-builder-config.mjs",
@@ -46,7 +46,8 @@
         "packages/client/ui-settings-general/src/types.ts",
         "packages/client/ui-settings-general/tests/desktop-feed.client.spec.ts"
       ],
-      "last_realized_against_tag": "dsh-v0.2.2-rc.3"
+      "last_realized_against_tag": "dsh-v0.2.2-rc.5",
+      "last_realized_at": "2026-11-23"
     },
     "dsh-linux-support-1b2e3f10": {
       "status": "applied",
@@ -54,10 +55,11 @@
       "author": "Imamuzzaki Abu Salam",
       "last_modified_by": "Imamuzzaki Abu Salam",
       "branch": "dsh/linux-support",
-      "last_realized_against_commit": "38a6a5c965aa99ab525161efb7cc5cf1fe62fced",
-      "last_realized_against_tag": "dsh-v0.2.2-rc.3",
-      "note": "Realized against upstream dsh-v0.2.2-rc.3 (38a6a5c9); channel+linux stack verified locally 2026-11-16 (202 focused linux suites + 9 channel suites green). Applies on top of dsh-forkhub-support-0qjj6stm, verified on rc.3. Retires the ImBIOS catalog copy.",
-      "depends_on_note": "Applies ONLY on top of dsh-forkhub-support-0qjj6stm in this same manifest (apply_order) \u2014 never on stock."
+      "last_realized_against_commit": "9c2670d3bce5275e0d1610272958121af87787bb",
+      "last_realized_against_tag": "dsh-v0.2.2-rc.5",
+      "note": "Clean-room verified against upstream dsh-v0.2.2-rc.5 (9c2670d3): pristine clone -> channel diff -> linux diff (both apply clean) -> verify.sh 202/202 green. Retires the ImBIOS catalog copy.",
+      "depends_on_note": "Applies ONLY on top of dsh-forkhub-support-0qjj6stm in this same manifest (apply_order) \u2014 never on stock.",
+      "last_realized_at": "2026-11-23"
     }
   },
   "apply_order": [
