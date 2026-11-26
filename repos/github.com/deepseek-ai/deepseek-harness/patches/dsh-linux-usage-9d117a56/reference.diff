@@ -1,22 +1,32 @@
 diff --git a/apps/desktop/src/forkhubUsage.ts b/apps/desktop/src/forkhubUsage.ts
 new file mode 100644
-index 0000000000..2b86e98ab3
+index 0000000000..ced8f7cdf0
 --- /dev/null
 +++ b/apps/desktop/src/forkhubUsage.ts
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,81 @@
 +/** Report daily foreground use of the ForkHub Linux release. */
 +import { createHash, randomUUID } from 'node:crypto'
 +import { mkdir, readFile, writeFile } from 'node:fs/promises'
 +import { join } from 'node:path'
 +
 +const endpoint = 'https://forkhub.imbios.dev/api/usage/deepseek-harness'
-+const ciVariables = ['CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'JENKINS_URL', 'BUILDKITE', 'CIRCLECI', 'TEAMCITY_VERSION']
++const trueValues = ['true', 'yes', 'on', '1', 'y']
++const ciVariables = [
++  'CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'TRAVIS', 'BUILDKITE',
++  'JENKINS_URL', 'TEAMCITY_VERSION', 'TF_BUILD', 'BITBUCKET_BUILD_NUMBER',
++  'CODEBUILD_BUILD_ID', 'DRONE', 'APPVEYOR',
++]
 +const forkHubVersion = /^\d+\.\d+\.\d+(?:-[\da-z.-]+)?\.with-fh\.\d{8}\.\d+$/iu
 +
++export function forkHubUsageOptedOut(environment: NodeJS.ProcessEnv): boolean {
++  const preference = environment.FORKHUB_TELEMETRY_ENABLED
++  return trueValues.includes(environment.DO_NOT_TRACK?.trim().toLowerCase() ?? '')
++    || (preference !== undefined && !trueValues.includes(preference.trim().toLowerCase()))
++}
++
 +export function forkHubUsageEnabled(environment: NodeJS.ProcessEnv): boolean {
-+  if (environment.DO_NOT_TRACK === '1') return false
-+  const preference = environment.FORKHUB_TELEMETRY_ENABLED?.trim().toLowerCase()
-+  if (preference !== undefined) return preference === 'true'
++  if (forkHubUsageOptedOut(environment)) return false
++  if (environment.FORKHUB_TELEMETRY_ENABLED !== undefined) return true
 +  return ciVariables.every(name => {
 +    const value = environment[name]?.trim().toLowerCase()
 +    return value === undefined || value === '' || value === '0' || value === 'false'
@@ -76,14 +86,14 @@ index 0000000000..2b86e98ab3
 +  }
 +}
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index c30ff70f53..db136ff23e 100644
+index c30ff70f53..59435797b5 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -75,6 +75,7 @@ import { DesktopUpdateOverlays } from './update-overlay.ts'
  import { DesktopQuitConfirmation } from './quit-confirmation.ts'
  import { DesktopTray } from './tray.ts'
  import { DesktopBackgroundNotice } from './background-notice.ts'
-+import { createForkHubUsageReporter } from './forkhubUsage.ts'
++import { createForkHubUsageReporter, forkHubUsageOptedOut } from './forkhubUsage.ts'
 
  let focusPrimaryWindow = (): void => {}
  let stopForRecovery = async (): Promise<void> => { await stopOperationReports() }
@@ -92,7 +102,7 @@ index c30ff70f53..db136ff23e 100644
      return result.environment
    })
 +  const reportForkHubUsage = process.platform === 'linux' && app.isPackaged
-+    && process.env.DO_NOT_TRACK !== '1' && process.env.FORKHUB_TELEMETRY_ENABLED?.trim().toLowerCase() !== 'false'
++    && !forkHubUsageOptedOut(process.env)
 +    ? createForkHubUsageReporter({
 +      version: app.getVersion(), userData: app.getPath('userData'), environment: loginShell,
 +    })
@@ -118,10 +128,10 @@ index c30ff70f53..db136ff23e 100644
        if (quitting || shellInstallerOwnsQuit || sessionEnding) return
 diff --git a/apps/desktop/tests/forkhub-usage.spec.ts b/apps/desktop/tests/forkhub-usage.spec.ts
 new file mode 100644
-index 0000000000..3f97712177
+index 0000000000..2ffdc4b72d
 --- /dev/null
 +++ b/apps/desktop/tests/forkhub-usage.spec.ts
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,45 @@
 +import { mkdtemp, readFile, rm } from 'node:fs/promises'
 +import { tmpdir } from 'node:os'
 +import { join } from 'node:path'
@@ -138,6 +148,8 @@ index 0000000000..3f97712177
 +  expect(forkHubUsageEnabled({})).toBe(true)
 +  expect(forkHubUsageEnabled({ FORKHUB_TELEMETRY_ENABLED: 'false' })).toBe(false)
 +  expect(forkHubUsageEnabled({ DO_NOT_TRACK: '1', FORKHUB_TELEMETRY_ENABLED: 'true' })).toBe(false)
++  expect(forkHubUsageEnabled({ DO_NOT_TRACK: ' yes ' })).toBe(false)
++  expect(forkHubUsageEnabled({ TF_BUILD: 'True' })).toBe(false)
 +  expect(forkHubUsageEnabled({ GITHUB_ACTIONS: 'true' })).toBe(false)
 +  expect(forkHubUsageEnabled({ CI: 'true', FORKHUB_TELEMETRY_ENABLED: 'true' })).toBe(true)
 +})
