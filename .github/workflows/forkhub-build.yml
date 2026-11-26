@@ -482,6 +482,29 @@ jobs:
             SLUG=$(echo "${{ matrix.pair.target }}" | awk -F/ '{print $(NF-1)"-"$NF}' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')
             tar -czf "$GITHUB_WORKSPACE/dist/$SLUG-patched-source.tar.gz" -C "$BD" .
           fi
+      - name: Sign DeepSeek Harness Linux AppImage
+        id: sign-linux
+        if: >-
+          steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          matrix.pair.target == 'github.com/deepseek-ai/deepseek-harness' && matrix.pair.os_key == 'linux'
+        env:
+          DSH_LINUX_SIGNING_SUBKEY: ${{ secrets.DSH_LINUX_SIGNING_SUBKEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DSH_LINUX_SIGNING_SUBKEY" ]]; then
+            echo "::error::DSH_LINUX_SIGNING_SUBKEY is required to publish the Linux AppImage"
+            exit 1
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          trap 'gpgconf --kill gpg-agent; rm -rf "$GNUPGHOME"' EXIT
+          printf '%s\n' "$DSH_LINUX_SIGNING_SUBKEY" | gpg --batch --import
+          unset DSH_LINUX_SIGNING_SUBKEY
+          sh forkhub/repos/github.com/deepseek-ai/deepseek-harness/build/sign-linux.sh "$GITHUB_WORKSPACE/dist"
+
+      - name: Generate asset checksums
+        if: steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true'
+        run: |
           (cd "$GITHUB_WORKSPACE/dist" && sha256sum * > SHA256SUMS || shasum -a 256 * > SHA256SUMS)
           # Multi-OS legs share one bundle release: a single SHA256SUMS would
           # be clobbered per leg, so each leg also ships a per-OS copy that
@@ -495,7 +518,10 @@ jobs:
         # github provider, which resolves versions under `v<version>` tags and
         # cannot consume the namespaced *-fhN bundle tags below). Absent hook
         # = no updater release; the namespaced bundle still publishes.
-        if: steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true'
+        if: >-
+          steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true' &&
+          (matrix.pair.target != 'github.com/deepseek-ai/deepseek-harness' || matrix.pair.os_key != 'linux' ||
+          steps.sign-linux.outcome == 'success')
         working-directory: forkhub
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -509,7 +535,10 @@ jobs:
           fi
 
       - name: Publish namespaced release
-        if: steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true'
+        if: >-
+          steps.skip-check.outputs.skip != 'true' && steps.apply.outputs.triaged != 'true' &&
+          (matrix.pair.target != 'github.com/deepseek-ai/deepseek-harness' || matrix.pair.os_key != 'linux' ||
+          steps.sign-linux.outcome == 'success')
         working-directory: forkhub
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

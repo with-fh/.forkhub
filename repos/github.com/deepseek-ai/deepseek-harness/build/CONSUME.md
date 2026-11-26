@@ -13,11 +13,15 @@ here.
   under emulation can time out on hosted runners) — arm64 always ships.
 - **Windows (unsigned):** the `*.exe` installer. SmartScreen will warn
   (unsigned fork build) — More info → Run anyway.
-- **Linux (unsigned):** the `*-linux-x86_64-unsigned.AppImage` from the
-  unified updater release (`v<base>.with-fh.<date>.<n>`). Make it
-  executable, then run with `--no-sandbox` on headless/Xvfb machines.
-  `dsh-linux-support` (in this catalog's stack) adds the linux-x64
-  target on top of the channel patch.
+- **Linux:** download the `*-linux-x86_64.AppImage` and its matching
+  `.AppImage.asc` signature. The app displays **DeepSeek Harness**.
+
+### Verify the Linux download
+
+Use the [ForkHub release public key](https://github.com/with-fh/.forkhub/blob/main/repos/github.com/deepseek-ai/deepseek-harness/build/forkhub-linux-release-key.asc)
+with fingerprint `D8FF 0E4B F333 38DC 18B6 74E4 EF0F 87A3 DB84 CF61`.
+After importing the key, run `gpg --verify FILE.AppImage.asc FILE.AppImage`
+with the downloaded filenames.
 
 ## Updates
 
