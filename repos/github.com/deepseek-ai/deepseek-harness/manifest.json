@@ -60,14 +60,31 @@
       "note": "Clean-room verified against upstream dsh-v0.2.2-rc.5 (9c2670d3): pristine clone -> channel diff -> linux diff (both apply clean) -> verify.sh 202/202 green. Retires the ImBIOS catalog copy.",
       "depends_on_note": "Applies ONLY on top of dsh-forkhub-support-0qjj6stm in this same manifest (apply_order) \u2014 never on stock.",
       "last_realized_at": "2026-11-23"
+    },
+    "dsh-linux-release-branding-c632dc1a": {
+      "status": "applied",
+      "version": "1.0.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "dsh/linux-release-branding",
+      "last_realized_against_commit": "9c2670d3bce5275e0d1610272958121af87787bb",
+      "last_realized_against_tag": "dsh-v0.2.2-rc.5",
+      "last_realized_at": "2026-11-26",
+      "depends_on_note": "Applies after dsh-forkhub-support-0qjj6stm and dsh-linux-support-1b2e3f10.",
+      "target_area": [
+        "apps/desktop/scripts/package-target.ts",
+        "apps/desktop/scripts/pack-local-packages.ts"
+      ]
     }
   },
   "apply_order": [
     "dsh-forkhub-support-0qjj6stm",
-    "dsh-linux-support-1b2e3f10"
+    "dsh-linux-support-1b2e3f10",
+    "dsh-linux-release-branding-c632dc1a"
   ],
   "slug_aliases": {
     "dsh-forkhub-support": "dsh-forkhub-support-0qjj6stm",
-    "dsh-linux-support": "dsh-linux-support-1b2e3f10"
+    "dsh-linux-support": "dsh-linux-support-1b2e3f10",
+    "dsh-linux-release-branding": "dsh-linux-release-branding-c632dc1a"
   }
 }

@@ -13,7 +13,7 @@
 # each other):
 #   mac    dmg + zip + latest-mac.yml + fh-mac.yml + blockmaps
 #   win    exe (nsis portable-equivalent unsigned) + latest.yml + fh.yml + blockmaps
-#   linux  AppImage + latest-linux.yml + fh-linux.yml + blockmaps
+#   linux  AppImage + detached signature + public key + updater manifests
 set -eu
 
 DIST="${DIST:?}"
@@ -69,7 +69,7 @@ if [ -n "$HAVE_WIN" ]; then
   done
 fi
 if [ -n "$HAVE_LINUX" ]; then
-  for f in "$DIST"/*.AppImage "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml "$DIST"/*.blockmap; do
+  for f in "$DIST"/*.AppImage "$DIST"/*.AppImage.asc "$DIST"/forkhub-linux-release-key.asc "$DIST"/latest-linux.yml "$DIST"/fh-linux.yml "$DIST"/*.blockmap; do
     [ -e "$f" ] || continue
     case "$(basename "$f")" in
       *.blockmap)

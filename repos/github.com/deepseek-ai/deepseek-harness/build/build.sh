@@ -230,8 +230,8 @@ case "$OS_KEY" in
       (sudo apt-get update >>"$LOG" 2>&1 || true) && sudo apt-get install -y xvfb >>"$LOG" 2>&1 \
         || say "xvfb install failed; smoke may SIGSEGV (see BUILD_LOG.md)"
     }
-    say "packaging linux unsigned (x64 AppImage)"
-    (cd apps/desktop && DSH_UPDATE_OWNER="$OWNER" DSH_DESKTOP_UPDATE_ENV=production ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a pnpm run "package:linux:x64:unsigned" -- --build-version "$FH_VERSION" >>"$LOG" 2>&1) \
+    say "packaging Linux release-branded x64 AppImage for signing"
+    (cd apps/desktop && DSH_UPDATE_OWNER="$OWNER" DSH_DESKTOP_UPDATE_ENV=production FORKHUB_LINUX_RELEASE=1 ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a pnpm run "package:linux:x64:unsigned" -- --build-version "$FH_VERSION" >>"$LOG" 2>&1) \
       || fail_soft "linux x64 pack failed (see BUILD_LOG.md)"
     ;;
   *)

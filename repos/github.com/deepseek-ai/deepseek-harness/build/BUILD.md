@@ -24,23 +24,21 @@ The in-app fork gate (`forkVersion.ts`) enforces the same-owner rule:
 `-rc.1.with-fh.<date>.1` → `-rc.1.with-fh.<date>.2` upgrades; stock↔fork
 and cross-owner pairs refuse.
 
-## What each leg builds (mirror of official, unsigned)
-
-Upstream `package:linux:x64:unsigned` (+ the `dsh-linux-support`
-patch in this manifest's stack) adds `linux-x64` alongside
-`mac-arm64 | mac-x64 | win-x64`. Unsigned (no certs in this
-catalog): mac legs run `package:mac:<arch>:unsigned`, win runs
-`package:win:x64:unsigned`, linux runs `package:linux:x64:unsigned`;
-Gatekeeper right-click-Open on first launch; SmartScreen warnings on
-Windows ("More info → Run anyway").
+## What each leg builds
 
 | leg | artifacts |
 |---|---|
-| mac (`macos-26`, unsigned) | `*-arm64.dmg` (x64 cross-pack best-effort; arm64 always ships), `latest-mac.yml` + `fh-mac.yml` when the leg emits manifests |
-| win (`windows-latest`, unsigned) | unsigned `*.exe`, `latest.yml` + `fh.yml` |
-| linux (`ubuntu-24.04`, unsigned) | unsigned `*.AppImage`, `latest-linux.yml` + `fh-linux.yml` |
+| mac (`macos-26`) | Unsigned DMG and updater manifests |
+| win (`windows-latest`) | Unsigned EXE, updater manifests, and block map |
+| linux (`ubuntu-24.04`) | AppImage, detached OpenPGP signature, public key, and updater manifests |
 
-Every leg also emits `*.blockmap` sidecars (differential updates).
+The Linux build sets `FORKHUB_LINUX_RELEASE=1` to select the same client
+profile as upstream's signed macOS and Windows builds. After electron-builder
+finishes, the workflow imports the dedicated OpenPGP signing subkey from
+`DSH_LINUX_SIGNING_SUBKEY`, signs the complete AppImage, and verifies the
+signature against the checked-in public key. Signing takes place before
+publication and checksum generation. Since the signature is detached,
+the embedded differential-update block map and SHA-512 stay valid.
 
 ## What `build.sh` does
 
@@ -59,9 +57,9 @@ Every leg also emits `*.blockmap` sidecars (differential updates).
    content is channel-agnostic since the fork `channel` is `nightly`),
    and asserts each manifest carries the stamped version and references
    only shipped files.
-6. Never fails the job: on any failure it packs a patched-source tarball,
-   logs to `BUILD_LOG.md`, and exits 0. `publish.sh` then skips the
-   updater release when no manifest exists.
+6. On packaging failure, stages build logs and a patched-source tarball.
+   The Linux signing step requires a complete AppImage and updater manifest
+   before either release can publish.
 
 ## `tagMatch` discipline
 
