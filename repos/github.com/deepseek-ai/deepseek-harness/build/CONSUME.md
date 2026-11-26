@@ -29,3 +29,11 @@ Updates are automatic: the app polls the ForkHub catalog feed
 (`with-fh/.forkhub` by default). To follow a different publisher's
 catalog, set the ForkHub publisher in Settings → Version first (it
 validates, repoints the feed, and checks immediately).
+
+## ForkHub usage reporting on Linux
+
+The Linux app counts daily foreground workspace use. It sends its build
+version and a hashed random installation ID to ForkHub when the
+workspace is used. To turn it off, set `FORKHUB_TELEMETRY_ENABLED=false`
+or `DO_NOT_TRACK=1` in your launcher environment or login shell and
+restart. See the [ForkHub privacy policy](https://forkhub.imbios.dev/privacy-policy).

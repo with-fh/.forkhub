@@ -1,0 +1,179 @@
+diff --git a/apps/desktop/src/forkhubUsage.ts b/apps/desktop/src/forkhubUsage.ts
+new file mode 100644
+index 0000000000..ced8f7cdf0
+--- /dev/null
++++ b/apps/desktop/src/forkhubUsage.ts
+@@ -0,0 +1,81 @@
++/** Report daily foreground use of the ForkHub Linux release. */
++import { createHash, randomUUID } from 'node:crypto'
++import { mkdir, readFile, writeFile } from 'node:fs/promises'
++import { join } from 'node:path'
++
++const endpoint = 'https://forkhub.imbios.dev/api/usage/deepseek-harness'
++const trueValues = ['true', 'yes', 'on', '1', 'y']
++const ciVariables = [
++  'CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'CIRCLECI', 'TRAVIS', 'BUILDKITE',
++  'JENKINS_URL', 'TEAMCITY_VERSION', 'TF_BUILD', 'BITBUCKET_BUILD_NUMBER',
++  'CODEBUILD_BUILD_ID', 'DRONE', 'APPVEYOR',
++]
++const forkHubVersion = /^\d+\.\d+\.\d+(?:-[\da-z.-]+)?\.with-fh\.\d{8}\.\d+$/iu
++
++export function forkHubUsageOptedOut(environment: NodeJS.ProcessEnv): boolean {
++  const preference = environment.FORKHUB_TELEMETRY_ENABLED
++  return trueValues.includes(environment.DO_NOT_TRACK?.trim().toLowerCase() ?? '')
++    || (preference !== undefined && !trueValues.includes(preference.trim().toLowerCase()))
++}
++
++export function forkHubUsageEnabled(environment: NodeJS.ProcessEnv): boolean {
++  if (forkHubUsageOptedOut(environment)) return false
++  if (environment.FORKHUB_TELEMETRY_ENABLED !== undefined) return true
++  return ciVariables.every(name => {
++    const value = environment[name]?.trim().toLowerCase()
++    return value === undefined || value === '' || value === '0' || value === 'false'
++  })
++}
++
++async function installationId(userData: string): Promise<string> {
++  const file = join(userData, 'forkhub-usage-id')
++  await mkdir(userData, { recursive: true })
++  const candidate = randomUUID()
++  await writeFile(file, candidate, { flag: 'wx', mode: 0o600 }).catch((error: unknown) => {
++    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error
++  })
++  const seed = await readFile(file, 'utf8')
++  if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/u.test(seed)) throw new Error('Invalid ForkHub usage ID')
++  return createHash('sha256').update('forkhub:dsh-linux:').update(seed).digest('hex')
++}
++
++export function createForkHubUsageReporter({
++  version,
++  userData,
++  environment,
++  send = fetch,
++  now = Date.now,
++}: {
++  version: string
++  userData: string
++  environment: Promise<NodeJS.ProcessEnv>
++  send?: typeof fetch
++  now?: () => number
++}): () => Promise<void> {
++  let lastReportedDay = ''
++  let retryAfter = 0
++  let pending = false
++
++  return async () => {
++    const timestamp = now()
++    const day = new Date(timestamp).toISOString().slice(0, 10)
++    if (!forkHubVersion.test(version) || day === lastReportedDay || pending || timestamp < retryAfter) return
++    pending = true
++    try {
++      if (!forkHubUsageEnabled(await environment)) return
++      const response = await send(endpoint, {
++        method: 'POST',
++        headers: { 'content-type': 'application/json' },
++        body: JSON.stringify({ installationId: await installationId(userData), version }),
++        redirect: 'error',
++        signal: AbortSignal.timeout(5000),
++      })
++      if (response.status === 204) lastReportedDay = day
++      else retryAfter = timestamp + 60_000
++    } catch {
++      retryAfter = timestamp + 60_000
++    } finally {
++      pending = false
++    }
++  }
++}
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index c30ff70f53..59435797b5 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -75,6 +75,7 @@ import { DesktopUpdateOverlays } from './update-overlay.ts'
+ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
+ import { DesktopTray } from './tray.ts'
+ import { DesktopBackgroundNotice } from './background-notice.ts'
++import { createForkHubUsageReporter, forkHubUsageOptedOut } from './forkhubUsage.ts'
+
+ let focusPrimaryWindow = (): void => {}
+ let stopForRecovery = async (): Promise<void> => { await stopOperationReports() }
+@@ -405,6 +406,12 @@ async function main(): Promise<void> {
+     for (const failure of result.failures) console.warn(`desktop login shell: ${failure.shell} failed (${failure.reason})`)
+     return result.environment
+   })
++  const reportForkHubUsage = process.platform === 'linux' && app.isPackaged
++    && !forkHubUsageOptedOut(process.env)
++    ? createForkHubUsageReporter({
++      version: app.getVersion(), userData: app.getPath('userData'), environment: loginShell,
++    })
++    : undefined
+   let hostEnvironment: NodeJS.ProcessEnv = process.env
+   const prepareHostEnvironment = async (): Promise<void> => { hostEnvironment = await loginShell }
+   let quitting = false
+@@ -1383,6 +1390,15 @@ async function main(): Promise<void> {
+     browserGuests.bind(window, (guest, name) => shortcuts.attachGuest(window, guest, name))
+     shortcuts.attach(window)
+     window.on('focus', automaticCheck)
++    if (reportForkHubUsage !== undefined) {
++      window.on('focus', () => { void reportForkHubUsage() })
++      window.webContents.on('before-input-event', (_event, input) => {
++        if (input.type === 'keyDown' && window.isFocused()) void reportForkHubUsage()
++      })
++      window.webContents.on('before-mouse-event', (_event, input) => {
++        if (input.type === 'mouseDown' && window.isFocused()) void reportForkHubUsage()
++      })
++    }
+     // Closing hides: the page and the Host keep running, and the next show resumes the same document.
+     window.on('close', (event) => {
+       if (quitting || shellInstallerOwnsQuit || sessionEnding) return
+diff --git a/apps/desktop/tests/forkhub-usage.spec.ts b/apps/desktop/tests/forkhub-usage.spec.ts
+new file mode 100644
+index 0000000000..2ffdc4b72d
+--- /dev/null
++++ b/apps/desktop/tests/forkhub-usage.spec.ts
+@@ -0,0 +1,45 @@
++import { mkdtemp, readFile, rm } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterEach, beforeEach, expect, test, vi } from 'vitest'
++import { createForkHubUsageReporter, forkHubUsageEnabled } from '../src/forkhubUsage.ts'
++
++let userData: string
++const version = '0.2.2-rc.5.with-fh.20261126.1'
++
++beforeEach(async () => { userData = await mkdtemp(join(tmpdir(), 'forkhub-usage-')) })
++afterEach(async () => { await rm(userData, { recursive: true, force: true }) })
++
++test('honors T3-style opt-out and CI precedence', () => {
++  expect(forkHubUsageEnabled({})).toBe(true)
++  expect(forkHubUsageEnabled({ FORKHUB_TELEMETRY_ENABLED: 'false' })).toBe(false)
++  expect(forkHubUsageEnabled({ DO_NOT_TRACK: '1', FORKHUB_TELEMETRY_ENABLED: 'true' })).toBe(false)
++  expect(forkHubUsageEnabled({ DO_NOT_TRACK: ' yes ' })).toBe(false)
++  expect(forkHubUsageEnabled({ TF_BUILD: 'True' })).toBe(false)
++  expect(forkHubUsageEnabled({ GITHUB_ACTIONS: 'true' })).toBe(false)
++  expect(forkHubUsageEnabled({ CI: 'true', FORKHUB_TELEMETRY_ENABLED: 'true' })).toBe(true)
++})
++
++test('sends only a hashed installation ID and version once per UTC day', async () => {
++  let now = Date.parse('2026-11-26T23:59:00Z')
++  const send = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }))
++  const report = createForkHubUsageReporter({ version, userData, environment: Promise.resolve({}), send, now: () => now })
++  await Promise.all([report(), report()])
++  await report()
++  expect(send).toHaveBeenCalledTimes(1)
++  const payload = JSON.parse(String(send.mock.calls[0]?.[1]?.body))
++  expect(payload).toEqual({ installationId: expect.stringMatching(/^[0-9a-f]{64}$/), version })
++  expect(payload.installationId).not.toBe(await readFile(join(userData, 'forkhub-usage-id'), 'utf8'))
++  now += 60_000
++  await report()
++  expect(send).toHaveBeenCalledTimes(2)
++  expect(JSON.parse(String(send.mock.calls[1]?.[1]?.body))).toEqual(payload)
++})
++
++test('creates no installation ID and sends no request when opted out', async () => {
++  const send = vi.fn<typeof fetch>()
++  const report = createForkHubUsageReporter({ version, userData, environment: Promise.resolve({ DO_NOT_TRACK: '1' }), send })
++  await report()
++  expect(send).not.toHaveBeenCalled()
++  await expect(readFile(join(userData, 'forkhub-usage-id'))).rejects.toMatchObject({ code: 'ENOENT' })
++})
