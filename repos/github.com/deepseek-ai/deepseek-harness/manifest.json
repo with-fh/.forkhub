@@ -75,16 +75,34 @@
         "apps/desktop/scripts/package-target.ts",
         "apps/desktop/scripts/pack-local-packages.ts"
       ]
+    },
+    "dsh-linux-usage-9d117a56": {
+      "status": "applied",
+      "version": "1.0.0",
+      "author": "Imamuzzaki Abu Salam",
+      "last_modified_by": "Imamuzzaki Abu Salam",
+      "branch": "dsh/linux-usage",
+      "last_realized_against_commit": "9c2670d3bce5275e0d1610272958121af87787bb",
+      "last_realized_against_tag": "dsh-v0.2.2-rc.5",
+      "last_realized_at": "2026-11-26",
+      "depends_on_note": "Apply after the Linux support and release branding patches.",
+      "target_area": [
+        "apps/desktop/src/main.ts",
+        "apps/desktop/src/forkhubUsage.ts",
+        "apps/desktop/tests/forkhub-usage.spec.ts"
+      ]
     }
   },
   "apply_order": [
     "dsh-forkhub-support-0qjj6stm",
     "dsh-linux-support-1b2e3f10",
-    "dsh-linux-release-branding-c632dc1a"
+    "dsh-linux-release-branding-c632dc1a",
+    "dsh-linux-usage-9d117a56"
   ],
   "slug_aliases": {
     "dsh-forkhub-support": "dsh-forkhub-support-0qjj6stm",
     "dsh-linux-support": "dsh-linux-support-1b2e3f10",
-    "dsh-linux-release-branding": "dsh-linux-release-branding-c632dc1a"
+    "dsh-linux-release-branding": "dsh-linux-release-branding-c632dc1a",
+    "dsh-linux-usage": "dsh-linux-usage-9d117a56"
   }
 }
